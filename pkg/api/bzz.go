@@ -16,36 +16,102 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethersphere/bee/pkg/log"
-	"github.com/gorilla/mux"
+	"github.com/opentracing/opentracing-go"
+	"github.com/opentracing/opentracing-go/ext"
+	olog "github.com/opentracing/opentracing-go/log"
 
-	"github.com/ethersphere/bee/pkg/feeds"
-	"github.com/ethersphere/bee/pkg/file/joiner"
-	"github.com/ethersphere/bee/pkg/file/loadsave"
-	"github.com/ethersphere/bee/pkg/jsonhttp"
-	"github.com/ethersphere/bee/pkg/manifest"
-	"github.com/ethersphere/bee/pkg/postage"
-	"github.com/ethersphere/bee/pkg/sctx"
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/ethersphere/bee/pkg/swarm"
-	"github.com/ethersphere/bee/pkg/tags"
-	"github.com/ethersphere/bee/pkg/tracing"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethersphere/bee/v2/pkg/accesscontrol"
+	"github.com/ethersphere/bee/v2/pkg/feeds"
+	"github.com/ethersphere/bee/v2/pkg/file"
+	"github.com/ethersphere/bee/v2/pkg/file/joiner"
+	"github.com/ethersphere/bee/v2/pkg/file/loadsave"
+	"github.com/ethersphere/bee/v2/pkg/file/redundancy"
+	"github.com/ethersphere/bee/v2/pkg/file/redundancy/getter"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/manifest"
+	"github.com/ethersphere/bee/v2/pkg/postage"
+	"github.com/ethersphere/bee/v2/pkg/storage"
+	"github.com/ethersphere/bee/v2/pkg/storer"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/topology"
+	"github.com/ethersphere/bee/v2/pkg/tracing"
 	"github.com/ethersphere/langos"
+	"github.com/gorilla/mux"
 )
 
+// The size of buffer used for prefetching content with Langos when not using erasure coding
+// Warning: This value influences the number of chunk requests and chunker join goroutines
+// per file request.
+// Recommended value is 8 or 16 times the io.Copy default buffer value which is 32kB, depending
+// on the file size. Use lookaheadBufferSize() to get the correct buffer size for the request.
+const (
+	smallFileBufferSize = 8 * 32 * 1024
+	largeFileBufferSize = 16 * 32 * 1024
+
+	largeBufferFilesizeThreshold = 10 * 1000000 // ten megs
+)
+
+func lookaheadBufferSize(size int64) int {
+	if size <= largeBufferFilesizeThreshold {
+		return smallFileBufferSize
+	}
+	return largeFileBufferSize
+}
+
 func (s *Service) bzzUploadHandler(w http.ResponseWriter, r *http.Request) {
-	logger := tracing.NewLoggerWithTraceID(r.Context(), s.logger.WithName("post_bzz").Build())
+	span, logger, ctx := s.tracer.StartSpanFromContext(r.Context(), "post_bzz", s.logger.WithName("post_bzz").Build())
+	defer span.Finish()
 
 	headers := struct {
-		ContentType string `map:"Content-Type,mimeMediaType" validate:"required"`
+		ContentType    string           `map:"Content-Type,mimeMediaType" validate:"required"`
+		BatchID        []byte           `map:"Swarm-Postage-Batch-Id" validate:"required"`
+		SwarmTag       uint64           `map:"Swarm-Tag"`
+		Pin            bool             `map:"Swarm-Pin"`
+		Deferred       *bool            `map:"Swarm-Deferred-Upload"`
+		Encrypt        bool             `map:"Swarm-Encrypt"`
+		IsDir          bool             `map:"Swarm-Collection"`
+		RLevel         redundancy.Level `map:"Swarm-Redundancy-Level"`
+		Act            bool             `map:"Swarm-Act"`
+		HistoryAddress swarm.Address    `map:"Swarm-Act-History-Address"`
 	}{}
 	if response := s.mapStructure(r.Header, &headers); response != nil {
 		response("invalid header params", logger, w)
 		return
 	}
 
-	putter, wait, err := s.newStamperPutter(r)
+	var (
+		tag      uint64
+		err      error
+		deferred = defaultUploadMethod(headers.Deferred)
+	)
+
+	ctx = redundancy.SetLevelInContext(ctx, headers.RLevel)
+
+	if deferred || headers.Pin {
+		tag, err = s.getOrCreateSessionID(headers.SwarmTag)
+		if err != nil {
+			logger.Debug("get or create tag failed", "error", err)
+			logger.Error(nil, "get or create tag failed")
+			switch {
+			case errors.Is(err, storage.ErrNotFound):
+				jsonhttp.NotFound(w, "tag not found")
+			default:
+				jsonhttp.InternalServerError(w, "cannot get or create tag")
+			}
+			ext.LogError(span, err, olog.String("action", "tag.create"))
+			return
+		}
+		span.SetTag("tagID", tag)
+	}
+
+	putter, err := s.newStamperPutter(ctx, putterOptions{
+		BatchID:  headers.BatchID,
+		TagID:    tag,
+		Pin:      headers.Pin,
+		Deferred: deferred,
+	})
 	if err != nil {
 		logger.Debug("putter failed", "error", err)
 		logger.Error(nil, "putter failed")
@@ -61,15 +127,21 @@ func (s *Service) bzzUploadHandler(w http.ResponseWriter, r *http.Request) {
 		default:
 			jsonhttp.BadRequest(w, nil)
 		}
+		ext.LogError(span, err, olog.String("action", "new.StamperPutter"))
 		return
 	}
 
-	isDir := r.Header.Get(SwarmCollectionHeader)
-	if strings.ToLower(isDir) == "true" || headers.ContentType == multiPartFormData {
-		s.dirUploadHandler(logger, w, r, putter, wait)
+	ow := &cleanupOnErrWriter{
+		ResponseWriter: w,
+		onErr:          putter.Cleanup,
+		logger:         logger,
+	}
+
+	if headers.IsDir || headers.ContentType == multiPartFormData {
+		s.dirUploadHandler(ctx, logger, span, ow, r, putter, r.Header.Get(ContentTypeHeader), headers.Encrypt, tag, headers.RLevel, headers.Act, headers.HistoryAddress)
 		return
 	}
-	s.fileUploadHandler(logger, w, r, putter, wait)
+	s.fileUploadHandler(ctx, logger, span, ow, r, putter, headers.Encrypt, tag, headers.RLevel, headers.Act, headers.HistoryAddress)
 }
 
 // fileUploadResponse is returned when an HTTP request to upload a file is successful
@@ -79,7 +151,19 @@ type bzzUploadResponse struct {
 
 // fileUploadHandler uploads the file and its metadata supplied in the file body and
 // the headers
-func (s *Service) fileUploadHandler(logger log.Logger, w http.ResponseWriter, r *http.Request, storer storage.Storer, waitFn func() error) {
+func (s *Service) fileUploadHandler(
+	ctx context.Context,
+	logger log.Logger,
+	span opentracing.Span,
+	w http.ResponseWriter,
+	r *http.Request,
+	putter storer.PutterSession,
+	encrypt bool,
+	tagID uint64,
+	rLevel redundancy.Level,
+	act bool,
+	historyAddress swarm.Address,
+) {
 	queries := struct {
 		FileName string `map:"name" validate:"startsnotwith=/"`
 	}{}
@@ -88,35 +172,7 @@ func (s *Service) fileUploadHandler(logger log.Logger, w http.ResponseWriter, r 
 		return
 	}
 
-	tag, created, err := s.getOrCreateTag(r.Header.Get(SwarmTagHeader))
-	if err != nil {
-		logger.Debug("get or create tag failed", "error", err)
-		logger.Error(nil, "get or create tag failed")
-		switch {
-		case errors.Is(err, tags.ErrNotFound):
-			jsonhttp.NotFound(w, "tag not found")
-		default:
-			jsonhttp.InternalServerError(w, "cannot get or create tag")
-		}
-		return
-	}
-
-	if !created {
-		// only in the case when tag is sent via header (i.e. not created by this request)
-		if estimatedTotalChunks := requestCalculateNumberOfChunks(r); estimatedTotalChunks > 0 {
-			err = tag.IncN(tags.TotalChunks, estimatedTotalChunks)
-			if err != nil {
-				logger.Debug("increment tag failed", "error", err)
-				logger.Error(nil, "increment tag failed")
-				jsonhttp.InternalServerError(w, "increment tag failed")
-				return
-			}
-		}
-	}
-
-	// Add the tag to the context
-	ctx := sctx.SetTag(r.Context(), tag)
-	p := requestPipelineFn(storer, r)
+	p := requestPipelineFn(putter, encrypt, rLevel)
 
 	// first store the file and get its reference
 	fr, err := p(ctx, r.Body)
@@ -129,6 +185,7 @@ func (s *Service) fileUploadHandler(logger log.Logger, w http.ResponseWriter, r 
 		default:
 			jsonhttp.InternalServerError(w, errFileStore)
 		}
+		ext.LogError(span, err, olog.String("action", "file.store"))
 		return
 	}
 
@@ -155,9 +212,8 @@ func (s *Service) fileUploadHandler(logger log.Logger, w http.ResponseWriter, r 
 		}
 	}
 
-	encrypt := requestEncrypt(r)
-	factory := requestPipelineFactory(ctx, storer, r)
-	l := loadsave.New(storer, factory)
+	factory := requestPipelineFactory(ctx, putter, encrypt, rLevel)
+	l := loadsave.New(s.storer.ChunkStore(), s.storer.Cache(), factory)
 
 	m, err := manifest.NewDefaultManifest(l, encrypt)
 	if err != nil {
@@ -184,7 +240,7 @@ func (s *Service) fileUploadHandler(logger log.Logger, w http.ResponseWriter, r 
 	}
 
 	fileMtdt := map[string]string{
-		manifest.EntryMetadataContentTypeKey: r.Header.Get(contentTypeHeader), // Content-Type has already been validated.
+		manifest.EntryMetadataContentTypeKey: r.Header.Get(ContentTypeHeader), // Content-Type has already been validated.
 		manifest.EntryMetadataFilenameKey:    queries.FileName,
 	}
 
@@ -198,22 +254,7 @@ func (s *Service) fileUploadHandler(logger log.Logger, w http.ResponseWriter, r 
 
 	logger.Debug("info", "encrypt", encrypt, "file_name", queries.FileName, "hash", fr, "metadata", fileMtdt)
 
-	storeSizeFn := []manifest.StoreSizeFunc{}
-	if !created {
-		// only in the case when tag is sent via header (i.e. not created by this request)
-		// each content that is saved for manifest
-		storeSizeFn = append(storeSizeFn, func(dataSize int64) error {
-			if estimatedTotalChunks := calculateNumberOfChunks(dataSize, encrypt); estimatedTotalChunks > 0 {
-				err = tag.IncN(tags.TotalChunks, estimatedTotalChunks)
-				if err != nil {
-					return fmt.Errorf("increment tag: %w", err)
-				}
-			}
-			return nil
-		})
-	}
-
-	manifestReference, err := m.Store(ctx, storeSizeFn...)
+	manifestReference, err := m.Store(ctx)
 	if err != nil {
 		logger.Debug("manifest store failed", "file_name", queries.FileName, "error", err)
 		logger.Error(nil, "manifest store failed", "file_name", queries.FileName)
@@ -227,37 +268,46 @@ func (s *Service) fileUploadHandler(logger log.Logger, w http.ResponseWriter, r 
 	}
 	logger.Debug("store", "manifest_reference", manifestReference)
 
-	if created {
-		_, err = tag.DoneSplit(manifestReference)
+	reference := manifestReference
+	if act {
+		reference, err = s.actEncryptionHandler(r.Context(), w, putter, reference, historyAddress)
 		if err != nil {
-			logger.Debug("done split failed", "error", err)
-			logger.Error(nil, "done split failed")
-			jsonhttp.InternalServerError(w, "done split failed")
+			logger.Debug("access control upload failed", "error", err)
+			logger.Error(nil, "access control upload failed")
+			switch {
+			case errors.Is(err, accesscontrol.ErrNotFound):
+				jsonhttp.NotFound(w, "act or history entry not found")
+			case errors.Is(err, accesscontrol.ErrInvalidPublicKey) || errors.Is(err, accesscontrol.ErrSecretKeyInfinity):
+				jsonhttp.BadRequest(w, "invalid public key")
+			case errors.Is(err, accesscontrol.ErrUnexpectedType):
+				jsonhttp.BadRequest(w, "failed to create history")
+			default:
+				jsonhttp.InternalServerError(w, errActUpload)
+			}
 			return
 		}
 	}
 
-	if requestPin(r) {
-		if err := s.pinning.CreatePin(ctx, manifestReference, false); err != nil {
-			logger.Debug("pin creation failed", "manifest_reference", manifestReference, "error", err)
-			logger.Error(nil, "pin creation failed")
-			jsonhttp.InternalServerError(w, "create pin failed")
-			return
-		}
-	}
-
-	if err = waitFn(); err != nil {
-		logger.Debug("sync chunks failed", "error", err)
-		logger.Error(nil, "sync chunks failed")
-		jsonhttp.InternalServerError(w, "sync chunks failed")
+	err = putter.Done(manifestReference)
+	if err != nil {
+		logger.Debug("done split failed", "reference", manifestReference, "error", err)
+		logger.Error(nil, "done split failed")
+		jsonhttp.InternalServerError(w, "done split failed")
+		ext.LogError(span, err, olog.String("action", "putter.Done"))
 		return
 	}
+	span.LogFields(olog.Bool("success", true))
+	span.SetTag("root_address", reference)
 
-	w.Header().Set("ETag", fmt.Sprintf("%q", manifestReference.String()))
-	w.Header().Set(SwarmTagHeader, fmt.Sprint(tag.Uid))
+	if tagID != 0 {
+		w.Header().Set(SwarmTagHeader, fmt.Sprint(tagID))
+		span.SetTag("tagID", tagID)
+	}
+	w.Header().Set(ETagHeader, fmt.Sprintf("%q", reference.String()))
 	w.Header().Set("Access-Control-Expose-Headers", SwarmTagHeader)
+
 	jsonhttp.Created(w, bzzUploadResponse{
-		Reference: manifestReference,
+		Reference: reference,
 	})
 }
 
@@ -273,20 +323,75 @@ func (s *Service) bzzDownloadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	address := paths.Address
+	if v := getAddressFromContext(r.Context()); !v.IsZero() {
+		address = v
+	}
+
 	if strings.HasSuffix(paths.Path, "/") {
 		paths.Path = strings.TrimRight(paths.Path, "/") + "/" // NOTE: leave one slash if there was some.
 	}
 
-	s.serveReference(logger, paths.Address, paths.Path, w, r)
+	s.serveReference(logger, address, paths.Path, w, r, false)
 }
 
-func (s *Service) serveReference(logger log.Logger, address swarm.Address, pathVar string, w http.ResponseWriter, r *http.Request) {
+func (s *Service) bzzHeadHandler(w http.ResponseWriter, r *http.Request) {
+	logger := tracing.NewLoggerWithTraceID(r.Context(), s.logger.WithName("head_bzz_by_path").Build())
+
+	paths := struct {
+		Address swarm.Address `map:"address,resolve" validate:"required"`
+		Path    string        `map:"path"`
+	}{}
+	if response := s.mapStructure(mux.Vars(r), &paths); response != nil {
+		response("invalid path params", logger, w)
+		return
+	}
+
+	address := paths.Address
+	if v := getAddressFromContext(r.Context()); !v.IsZero() {
+		address = v
+	}
+
+	if strings.HasSuffix(paths.Path, "/") {
+		paths.Path = strings.TrimRight(paths.Path, "/") + "/" // NOTE: leave one slash if there was some.
+	}
+
+	s.serveReference(logger, address, paths.Path, w, r, true)
+}
+
+func (s *Service) serveReference(logger log.Logger, address swarm.Address, pathVar string, w http.ResponseWriter, r *http.Request, headerOnly bool) {
 	loggerV1 := logger.V(1).Build()
 
-	ls := loadsave.NewReadonly(s.storer)
+	headers := struct {
+		Cache                 *bool             `map:"Swarm-Cache"`
+		Strategy              *getter.Strategy  `map:"Swarm-Redundancy-Strategy"`
+		FallbackMode          *bool             `map:"Swarm-Redundancy-Fallback-Mode"`
+		RLevel                *redundancy.Level `map:"Swarm-Redundancy-Level"`
+		ChunkRetrievalTimeout *string           `map:"Swarm-Chunk-Retrieval-Timeout"`
+	}{}
+
+	if response := s.mapStructure(r.Header, &headers); response != nil {
+		response("invalid header params", logger, w)
+		return
+	}
+	cache := true
+	if headers.Cache != nil {
+		cache = *headers.Cache
+	}
+
+	ls := loadsave.NewReadonly(s.storer.Download(cache))
 	feedDereferenced := false
 
 	ctx := r.Context()
+	ctx, err := getter.SetConfigInContext(ctx, headers.Strategy, headers.FallbackMode, headers.ChunkRetrievalTimeout, logger)
+	if err != nil {
+		logger.Error(err, err.Error())
+		jsonhttp.BadRequest(w, "could not parse headers")
+		return
+	}
+	if headers.RLevel != nil {
+		ctx = redundancy.SetLevelInContext(ctx, *headers.RLevel)
+	}
 
 FETCH:
 	// read manifest entry
@@ -321,14 +426,17 @@ FETCH:
 				jsonhttp.NotFound(w, "no update found")
 				return
 			}
-			ref, _, err := parseFeedUpdate(ch)
+			wc, err := feeds.GetWrappedChunk(ctx, s.storer.Download(cache), ch)
 			if err != nil {
 				logger.Debug("bzz download: mapStructure feed update failed", "error", err)
 				logger.Error(nil, "bzz download: mapStructure feed update failed")
 				jsonhttp.InternalServerError(w, "mapStructure feed update")
 				return
 			}
-			address = ref
+			address = wc.Address()
+			// modify ls and init with non-existing wrapped chunk
+			ls = loadsave.NewReadonlyWithRootCh(s.storer.Download(cache), wc)
+
 			feedDereferenced = true
 			curBytes, err := cur.MarshalBinary()
 			if err != nil {
@@ -358,7 +466,7 @@ FETCH:
 				// index document exists
 				logger.Debug("bzz download: serving path", "path", pathWithIndex)
 
-				s.serveManifestEntry(logger, w, r, indexDocumentManifestEntry, !feedDereferenced)
+				s.serveManifestEntry(logger, w, r, indexDocumentManifestEntry, !feedDereferenced, headerOnly)
 				return
 			}
 		}
@@ -367,7 +475,6 @@ FETCH:
 		jsonhttp.NotFound(w, "address not found or incorrect")
 		return
 	}
-
 	me, err := m.Lookup(ctx, pathVar)
 	if err != nil {
 		loggerV1.Debug("bzz download: invalid path", "address", address, "path", pathVar, "error", err)
@@ -402,7 +509,7 @@ FETCH:
 						// index document exists
 						logger.Debug("bzz download: serving path", "path", pathWithIndex)
 
-						s.serveManifestEntry(logger, w, r, indexDocumentManifestEntry, !feedDereferenced)
+						s.serveManifestEntry(logger, w, r, indexDocumentManifestEntry, !feedDereferenced, headerOnly)
 						return
 					}
 				}
@@ -416,7 +523,7 @@ FETCH:
 						// error document exists
 						logger.Debug("bzz download: serving path", "path", errorDocumentPath)
 
-						s.serveManifestEntry(logger, w, r, errorDocumentManifestEntry, !feedDereferenced)
+						s.serveManifestEntry(logger, w, r, errorDocumentManifestEntry, !feedDereferenced, headerOnly)
 						return
 					}
 				}
@@ -430,7 +537,7 @@ FETCH:
 	}
 
 	// serve requested path
-	s.serveManifestEntry(logger, w, r, me, !feedDereferenced)
+	s.serveManifestEntry(logger, w, r, me, !feedDereferenced, headerOnly)
 }
 
 func (s *Service) serveManifestEntry(
@@ -438,29 +545,66 @@ func (s *Service) serveManifestEntry(
 	w http.ResponseWriter,
 	r *http.Request,
 	manifestEntry manifest.Entry,
-	etag bool,
+	etag, headersOnly bool,
 ) {
 	additionalHeaders := http.Header{}
 	mtdt := manifestEntry.Metadata()
 	if fname, ok := mtdt[manifest.EntryMetadataFilenameKey]; ok {
 		fname = filepath.Base(fname) // only keep the file name
-		additionalHeaders["Content-Disposition"] =
+		additionalHeaders[ContentDispositionHeader] =
 			[]string{fmt.Sprintf("inline; filename=\"%s\"", fname)}
 	}
 	if mimeType, ok := mtdt[manifest.EntryMetadataContentTypeKey]; ok {
-		additionalHeaders["Content-Type"] = []string{mimeType}
+		additionalHeaders[ContentTypeHeader] = []string{mimeType}
 	}
 
-	s.downloadHandler(logger, w, r, manifestEntry.Reference(), additionalHeaders, etag)
+	s.downloadHandler(logger, w, r, manifestEntry.Reference(), additionalHeaders, etag, headersOnly, nil)
 }
 
-// downloadHandler contains common logic for dowloading Swarm file from API
-func (s *Service) downloadHandler(logger log.Logger, w http.ResponseWriter, r *http.Request, reference swarm.Address, additionalHeaders http.Header, etag bool) {
-	reader, l, err := joiner.New(r.Context(), s.storer, reference)
+// downloadHandler contains common logic for downloading Swarm file from API
+func (s *Service) downloadHandler(logger log.Logger, w http.ResponseWriter, r *http.Request, reference swarm.Address, additionalHeaders http.Header, etag, headersOnly bool, rootCh swarm.Chunk) {
+	headers := struct {
+		Strategy              *getter.Strategy  `map:"Swarm-Redundancy-Strategy"`
+		RLevel                *redundancy.Level `map:"Swarm-Redundancy-Level"`
+		FallbackMode          *bool             `map:"Swarm-Redundancy-Fallback-Mode"`
+		ChunkRetrievalTimeout *string           `map:"Swarm-Chunk-Retrieval-Timeout"`
+		LookaheadBufferSize   *int              `map:"Swarm-Lookahead-Buffer-Size"`
+		Cache                 *bool             `map:"Swarm-Cache"`
+	}{}
+
+	if response := s.mapStructure(r.Header, &headers); response != nil {
+		response("invalid header params", logger, w)
+		return
+	}
+	cache := true
+	if headers.Cache != nil {
+		cache = *headers.Cache
+	}
+
+	ctx := r.Context()
+	ctx, err := getter.SetConfigInContext(ctx, headers.Strategy, headers.FallbackMode, headers.ChunkRetrievalTimeout, logger)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
+		logger.Error(err, err.Error())
+		jsonhttp.BadRequest(w, "could not parse headers")
+		return
+	}
+	if headers.RLevel != nil {
+		ctx = redundancy.SetLevelInContext(ctx, *headers.RLevel)
+	}
+
+	var (
+		reader file.Joiner
+		l      int64
+	)
+	if rootCh != nil {
+		reader, l, err = joiner.NewJoiner(ctx, s.storer.Download(cache), s.storer.Cache(), reference, rootCh)
+	} else {
+		reader, l, err = joiner.New(ctx, s.storer.Download(cache), s.storer.Cache(), reference)
+	}
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) || errors.Is(err, topology.ErrNotFound) {
 			logger.Debug("api download: not found ", "address", reference, "error", err)
-			logger.Error(nil, "not found")
+			logger.Error(nil, err.Error())
 			jsonhttp.NotFound(w, nil)
 			return
 		}
@@ -475,11 +619,25 @@ func (s *Service) downloadHandler(logger log.Logger, w http.ResponseWriter, r *h
 		w.Header().Set(name, strings.Join(values, "; "))
 	}
 	if etag {
-		w.Header().Set("ETag", fmt.Sprintf("%q", reference))
+		w.Header().Set(ETagHeader, fmt.Sprintf("%q", reference))
 	}
-	w.Header().Set("Content-Length", strconv.FormatInt(l, 10))
-	w.Header().Set("Access-Control-Expose-Headers", "Content-Disposition")
-	http.ServeContent(w, r, "", time.Now(), langos.NewBufferedLangos(reader, lookaheadBufferSize(l)))
+	w.Header().Set(ContentLengthHeader, strconv.FormatInt(l, 10))
+	w.Header().Set("Access-Control-Expose-Headers", ContentDispositionHeader)
+
+	if headersOnly {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	bufSize := lookaheadBufferSize(l)
+	if headers.LookaheadBufferSize != nil {
+		bufSize = *(headers.LookaheadBufferSize)
+	}
+	if bufSize > 0 {
+		http.ServeContent(w, r, "", time.Now(), langos.NewBufferedLangos(reader, bufSize))
+		return
+	}
+	http.ServeContent(w, r, "", time.Now(), reader)
 }
 
 // manifestMetadataLoad returns the value for a key stored in the metadata of

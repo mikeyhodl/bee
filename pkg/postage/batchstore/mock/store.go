@@ -10,17 +10,16 @@ import (
 	"math/big"
 	"sync"
 
-	"github.com/ethersphere/bee/pkg/postage"
-	"github.com/ethersphere/bee/pkg/postage/batchstore"
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/ethersphere/bee/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/postage"
+	"github.com/ethersphere/bee/v2/pkg/postage/batchstore"
+	"github.com/ethersphere/bee/v2/pkg/storage"
 )
 
 var _ postage.Storer = (*BatchStore)(nil)
 
 // BatchStore is a mock BatchStorer
 type BatchStore struct {
-	rs                    *postage.ReserveState
+	radius                uint8
 	cs                    *postage.ChainState
 	isWithinStorageRadius bool
 	id                    []byte
@@ -31,8 +30,6 @@ type BatchStore struct {
 	saveErr               error
 	updateErrDelayCnt     int
 	resetCallCount        int
-
-	radiusSetter postage.StorageRadiusSetter
 
 	existsFn func([]byte) (bool, error)
 
@@ -48,7 +45,6 @@ type Option func(*BatchStore)
 func New(opts ...Option) *BatchStore {
 	bs := &BatchStore{}
 	bs.cs = &postage.ChainState{}
-	bs.rs = &postage.ReserveState{}
 	bs.isWithinStorageRadius = true
 	for _, o := range opts {
 		o(bs)
@@ -57,15 +53,9 @@ func New(opts ...Option) *BatchStore {
 }
 
 // WithReserveState will set the initial reservestate in the ChainStore mock.
-func WithReserveState(rs *postage.ReserveState) Option {
+func WithRadius(radius uint8) Option {
 	return func(bs *BatchStore) {
-		bs.rs = rs
-	}
-}
-
-func WithIsWithinStorageRadius(b bool) Option {
-	return func(bs *BatchStore) {
-		bs.isWithinStorageRadius = b
+		bs.radius = radius
 	}
 }
 
@@ -145,6 +135,8 @@ func (bs *BatchStore) Get(id []byte) (*postage.Batch, error) {
 
 // Iterate mocks the Iterate method from the BatchStore
 func (bs *BatchStore) Iterate(f func(*postage.Batch) (bool, error)) error {
+	bs.mtx.Lock()
+	defer bs.mtx.Unlock()
 	if bs.batch == nil {
 		return nil
 	}
@@ -154,6 +146,8 @@ func (bs *BatchStore) Iterate(f func(*postage.Batch) (bool, error)) error {
 
 // Save mocks the Save method from the BatchStore.
 func (bs *BatchStore) Save(batch *postage.Batch) error {
+	bs.mtx.Lock()
+	defer bs.mtx.Unlock()
 	if bs.batch != nil {
 		return errors.New("batch already taken")
 	}
@@ -188,6 +182,11 @@ func (bs *BatchStore) GetChainState() *postage.ChainState {
 	return bs.cs
 }
 
+// GetChainState mocks the GetChainState method from the BatchStore
+func (bs *BatchStore) Commitment() (uint64, error) {
+	return 0, nil
+}
+
 // PutChainState mocks the PutChainState method from the BatchStore
 func (bs *BatchStore) PutChainState(cs *postage.ChainState) error {
 	if bs.updateErr != nil {
@@ -200,49 +199,11 @@ func (bs *BatchStore) PutChainState(cs *postage.ChainState) error {
 	return nil
 }
 
-func (bs *BatchStore) GetReserveState() *postage.ReserveState {
+func (bs *BatchStore) Radius() uint8 {
 	bs.mtx.Lock()
 	defer bs.mtx.Unlock()
 
-	rs := new(postage.ReserveState)
-	if bs.rs != nil {
-		rs.Radius = bs.rs.Radius
-		rs.StorageRadius = bs.rs.StorageRadius
-	}
-	return rs
-}
-
-func (bs *BatchStore) StorageRadius() uint8 {
-	bs.mtx.Lock()
-	defer bs.mtx.Unlock()
-
-	if bs.rs != nil {
-		return bs.rs.StorageRadius
-	}
-	return 0
-}
-
-func (bs *BatchStore) IsWithinStorageRadius(swarm.Address) bool {
-	return bs.isWithinStorageRadius
-}
-
-func (bs *BatchStore) SetStorageRadiusSetter(r postage.StorageRadiusSetter) {
-	bs.radiusSetter = r
-}
-
-func (bs *BatchStore) SetStorageRadius(f func(uint8) uint8) error {
-	bs.mtx.Lock()
-	defer bs.mtx.Unlock()
-
-	bs.rs.StorageRadius = f(bs.rs.StorageRadius)
-	if bs.radiusSetter != nil {
-		bs.radiusSetter.SetStorageRadius(bs.rs.StorageRadius)
-	}
-	return nil
-}
-
-func (bs *BatchStore) Unreserve(_ postage.UnreserveIteratorFn) error {
-	panic("not implemented")
+	return bs.radius
 }
 
 // Exists reports whether batch referenced by the give id exists.

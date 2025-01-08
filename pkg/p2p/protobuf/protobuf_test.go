@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethersphere/bee/pkg/p2p"
-	"github.com/ethersphere/bee/pkg/p2p/protobuf"
-	"github.com/ethersphere/bee/pkg/p2p/protobuf/internal/pb"
+	"github.com/ethersphere/bee/v2/pkg/p2p"
+	"github.com/ethersphere/bee/v2/pkg/p2p/protobuf"
+	"github.com/ethersphere/bee/v2/pkg/p2p/protobuf/internal/pb"
 )
 
 func TestReader_ReadMsg(t *testing.T) {
@@ -44,7 +44,6 @@ func TestReader_ReadMsg(t *testing.T) {
 			},
 		},
 	} {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -98,7 +97,6 @@ func TestReader_timeout(t *testing.T) {
 			},
 		},
 	} {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -164,7 +162,6 @@ func TestWriter(t *testing.T) {
 			},
 		},
 	} {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -186,6 +183,8 @@ func TestWriter(t *testing.T) {
 }
 
 func TestWriter_timeout(t *testing.T) {
+	t.Parallel()
+
 	messages := []string{"first", "second", "third"}
 
 	for _, tc := range []struct {
@@ -208,40 +207,37 @@ func TestWriter_timeout(t *testing.T) {
 			},
 		},
 	} {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Run("WithContext", func(t *testing.T) {
-				t.Parallel()
+		t.Run(tc.name+"WithContext", func(t *testing.T) {
+			t.Parallel()
 
-				w, msgs := tc.writerFunc()
+			w, msgs := tc.writerFunc()
 
-				for i, m := range messages {
-					var timeout time.Duration
-					if i == 0 {
-						timeout = 1000 * time.Millisecond
-					} else {
-						timeout = 10 * time.Millisecond
-					}
-					ctx, cancel := context.WithTimeout(context.Background(), timeout)
-					defer cancel()
-					err := w.WriteMsgWithContext(ctx, &pb.Message{
-						Text: m,
-					})
-					if i == 0 {
-						if err != nil {
-							t.Fatal(err)
-						}
-					} else {
-						if !errors.Is(err, context.DeadlineExceeded) {
-							t.Fatalf("got error %v, want %v", err, context.DeadlineExceeded)
-						}
-						break
-					}
-					if got := <-msgs; got != m {
-						t.Fatalf("got message %q, want %q", got, m)
-					}
+			for i, m := range messages {
+				var timeout time.Duration
+				if i == 0 {
+					timeout = 1000 * time.Millisecond
+				} else {
+					timeout = 10 * time.Millisecond
 				}
-			})
+				ctx, cancel := context.WithTimeout(context.Background(), timeout)
+				defer cancel()
+				err := w.WriteMsgWithContext(ctx, &pb.Message{
+					Text: m,
+				})
+				if i == 0 {
+					if err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if !errors.Is(err, context.DeadlineExceeded) {
+						t.Fatalf("got error %v, want %v", err, context.DeadlineExceeded)
+					}
+					break
+				}
+				if got := <-msgs; got != m {
+					t.Fatalf("got message %q, want %q", got, m)
+				}
+			}
 		})
 	}
 }

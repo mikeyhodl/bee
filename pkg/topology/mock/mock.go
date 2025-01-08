@@ -6,11 +6,13 @@ package mock
 
 import (
 	"context"
+	"maps"
 	"sync"
+	"time"
 
-	"github.com/ethersphere/bee/pkg/p2p"
-	"github.com/ethersphere/bee/pkg/swarm"
-	"github.com/ethersphere/bee/pkg/topology"
+	"github.com/ethersphere/bee/v2/pkg/p2p"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/topology"
 )
 
 type mock struct {
@@ -23,7 +25,10 @@ type mock struct {
 	isWithinFunc    func(c swarm.Address) bool
 	marshalJSONFunc func() ([]byte, error)
 	mtx             sync.Mutex
+	health          map[string]bool
 }
+
+var _ topology.Driver = (*mock)(nil)
 
 func WithPeers(peers ...swarm.Address) Option {
 	return optionFunc(func(d *mock) {
@@ -67,11 +72,14 @@ func WithIsWithinFunc(f func(swarm.Address) bool) Option {
 	})
 }
 
-func NewTopologyDriver(opts ...Option) topology.Driver {
+func NewTopologyDriver(opts ...Option) *mock {
 	d := new(mock)
 	for _, o := range opts {
 		o.apply(d)
 	}
+
+	d.health = map[string]bool{}
+
 	return d
 }
 
@@ -102,11 +110,23 @@ func (d *mock) AnnounceTo(_ context.Context, _, _ swarm.Address, _ bool) error {
 	return nil
 }
 
+func (d *mock) UpdatePeerHealth(peer swarm.Address, health bool, pingDur time.Duration) {
+	d.mtx.Lock()
+	defer d.mtx.Unlock()
+	d.health[peer.ByteString()] = health
+}
+
+func (d *mock) PeersHealth() map[string]bool {
+	d.mtx.Lock()
+	defer d.mtx.Unlock()
+	return maps.Clone(d.health)
+}
+
 func (d *mock) Peers() []swarm.Address {
 	return d.peers
 }
 
-func (d *mock) ClosestPeer(addr swarm.Address, wantSelf bool, _ topology.Filter, skipPeers ...swarm.Address) (peerAddr swarm.Address, err error) {
+func (d *mock) ClosestPeer(addr swarm.Address, wantSelf bool, _ topology.Select, skipPeers ...swarm.Address) (peerAddr swarm.Address, err error) {
 	if len(skipPeers) == 0 {
 		if d.closestPeerErr != nil {
 			return d.closestPeer, d.closestPeerErr
@@ -156,6 +176,10 @@ func (d *mock) ClosestPeer(addr swarm.Address, wantSelf bool, _ topology.Filter,
 	return peerAddr, nil
 }
 
+func (m *mock) IsReachable() bool {
+	return true
+}
+
 func (d *mock) SubscribeTopologyChange() (c <-chan struct{}, unsubscribe func()) {
 	return c, unsubscribe
 }
@@ -164,16 +188,10 @@ func (m *mock) NeighborhoodDepth() uint8 {
 	return m.depth
 }
 
-func (m *mock) EachNeighbor(f topology.EachPeerFunc) error {
-	return m.EachConnectedPeer(f, topology.Filter{})
-}
-
-func (*mock) EachNeighborRev(_ topology.EachPeerFunc) error {
-	panic("not implemented") // TODO: Implement
-}
+func (m *mock) SetStorageRadius(uint8) {}
 
 // EachConnectedPeer implements topology.PeerIterator interface.
-func (d *mock) EachConnectedPeer(f topology.EachPeerFunc, _ topology.Filter) (err error) {
+func (d *mock) EachConnectedPeer(f topology.EachPeerFunc, _ topology.Select) (err error) {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 
@@ -192,7 +210,7 @@ func (d *mock) EachConnectedPeer(f topology.EachPeerFunc, _ topology.Filter) (er
 }
 
 // EachConnectedPeerRev implements topology.PeerIterator interface.
-func (d *mock) EachConnectedPeerRev(f topology.EachPeerFunc, _ topology.Filter) (err error) {
+func (d *mock) EachConnectedPeerRev(f topology.EachPeerFunc, _ topology.Select) (err error) {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 

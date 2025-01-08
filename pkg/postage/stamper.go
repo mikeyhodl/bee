@@ -5,12 +5,13 @@
 package postage
 
 import (
-	"encoding/binary"
+	"bytes"
 	"errors"
-	"time"
+	"fmt"
 
-	"github.com/ethersphere/bee/pkg/crypto"
-	"github.com/ethersphere/bee/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/crypto"
+	"github.com/ethersphere/bee/v2/pkg/storage"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
 )
 
 var (
@@ -18,32 +19,60 @@ var (
 	ErrBucketFull = errors.New("bucket full")
 )
 
-// Stamper can issue stamps from the given address.
+// Stamper can issue stamps from the given address of chunk.
 type Stamper interface {
-	Stamp(swarm.Address) (*Stamp, error)
+	// addr is the request address of the chunk and idAddr is the identity address of the chunk.
+	Stamp(addr, idAddr swarm.Address) (*Stamp, error)
+	BatchId() []byte
 }
 
 // stamper connects a stampissuer with a signer.
 // A stamper is created for each upload session.
 type stamper struct {
+	store  storage.Store
 	issuer *StampIssuer
 	signer crypto.Signer
 }
 
 // NewStamper constructs a Stamper.
-func NewStamper(st *StampIssuer, signer crypto.Signer) Stamper {
-	return &stamper{st, signer}
+func NewStamper(store storage.Store, issuer *StampIssuer, signer crypto.Signer) Stamper {
+	return &stamper{store, issuer, signer}
 }
 
-// Stamp takes chunk, see if the chunk can included in the batch and
+// Stamp takes chunk, see if the chunk can be included in the batch and
 // signs it with the owner of the batch of this Stamp issuer.
-func (st *stamper) Stamp(addr swarm.Address) (*Stamp, error) {
-	index, err := st.issuer.inc(addr)
-	if err != nil {
-		return nil, err
+func (st *stamper) Stamp(addr, idAddr swarm.Address) (*Stamp, error) {
+	st.issuer.mtx.Lock()
+	defer st.issuer.mtx.Unlock()
+
+	item := &StampItem{
+		BatchID:      st.issuer.data.BatchID,
+		chunkAddress: idAddr,
 	}
-	ts := timestamp()
-	toSign, err := toSignDigest(addr.Bytes(), st.issuer.data.BatchID, index, ts)
+	switch err := st.store.Get(item); {
+	case err == nil:
+		item.BatchTimestamp = unixTime()
+		if err = st.store.Put(item); err != nil {
+			return nil, err
+		}
+	case errors.Is(err, storage.ErrNotFound):
+		item.BatchIndex, item.BatchTimestamp, err = st.issuer.increment(addr)
+		if err != nil {
+			return nil, err
+		}
+		if err := st.store.Put(item); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("get stamp for %s: %w", item, err)
+	}
+
+	toSign, err := ToSignDigest(
+		addr.Bytes(),
+		st.issuer.data.BatchID,
+		item.BatchIndex,
+		item.BatchTimestamp,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -51,11 +80,38 @@ func (st *stamper) Stamp(addr swarm.Address) (*Stamp, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewStamp(st.issuer.data.BatchID, index, ts, sig), nil
+	return NewStamp(st.issuer.data.BatchID, item.BatchIndex, item.BatchTimestamp, sig), nil
 }
 
-func timestamp() []byte {
-	ts := make([]byte, 8)
-	binary.BigEndian.PutUint64(ts, uint64(time.Now().UnixNano()))
-	return ts
+// BatchId gives back batch id of stamper
+func (st *stamper) BatchId() []byte {
+	return st.issuer.data.BatchID
+}
+
+type presignedStamper struct {
+	stamp *Stamp
+	owner []byte
+}
+
+func NewPresignedStamper(stamp *Stamp, owner []byte) Stamper {
+	return &presignedStamper{stamp, owner}
+}
+
+func (st *presignedStamper) Stamp(addr, _ swarm.Address) (*Stamp, error) {
+	// check stored stamp is against the chunk address
+	// Recover the public key from the signature
+	signerAddr, err := RecoverBatchOwner(addr, st.stamp)
+	if err != nil {
+		return nil, err
+	}
+
+	if !bytes.Equal(st.owner, signerAddr) {
+		return nil, ErrInvalidBatchSignature
+	}
+
+	return st.stamp, nil
+}
+
+func (st *presignedStamper) BatchId() []byte {
+	return st.stamp.BatchID()
 }

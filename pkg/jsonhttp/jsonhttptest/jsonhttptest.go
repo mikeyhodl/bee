@@ -18,7 +18,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/ethersphere/bee/pkg/jsonhttp"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
 )
 
 // Request is a testing helper function that makes an HTTP request using
@@ -52,6 +52,12 @@ func Request(tb testing.TB, client *http.Client, method, url string, responseCod
 
 	if resp.StatusCode != responseCode {
 		tb.Errorf("got response status %s, want %v %s", resp.Status, responseCode, http.StatusText(responseCode))
+	}
+
+	for _, key := range o.nonEmptyResponseHeaders {
+		if val := resp.Header.Get(key); val == "" {
+			tb.Errorf("header key=[%s] should be set", key)
+		}
 	}
 
 	if headers := o.expectedResponseHeaders; headers != nil {
@@ -235,6 +241,18 @@ func WithExpectedContentLength(value int) Option {
 	return WithExpectedResponseHeader("Content-Length", strconv.Itoa(value))
 }
 
+// WithNonEmptyResponseHeader validates that the response from the request
+// has header with non empty value.
+func WithNonEmptyResponseHeader(key string) Option {
+	return optionFunc(func(o *options) error {
+		if o.nonEmptyResponseHeaders == nil {
+			o.nonEmptyResponseHeaders = make([]string, 0, 1)
+		}
+		o.nonEmptyResponseHeaders = append(o.nonEmptyResponseHeaders, key)
+		return nil
+	})
+}
+
 // WithExpectedJSONResponse validates that the response from the request in the
 // Request function matches JSON-encoded body provided here.
 func WithExpectedJSONResponse(response interface{}) Option {
@@ -283,6 +301,7 @@ type options struct {
 	requestBody             io.Reader
 	requestHeaders          http.Header
 	expectedResponseHeaders http.Header
+	nonEmptyResponseHeaders []string
 	expectedResponse        []byte
 	expectedJSONResponse    interface{}
 	unmarshalResponse       interface{}

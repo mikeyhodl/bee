@@ -11,15 +11,17 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/ethersphere/bee/pkg/cac"
-	"github.com/ethersphere/bee/pkg/jsonhttp"
-	"github.com/ethersphere/bee/pkg/postage"
-	"github.com/ethersphere/bee/pkg/sctx"
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/ethersphere/bee/pkg/swarm"
-	"github.com/ethersphere/bee/pkg/tags"
-	"github.com/ethersphere/bee/pkg/tracing"
+	"github.com/ethersphere/bee/v2/pkg/accesscontrol"
+	"github.com/ethersphere/bee/v2/pkg/cac"
+	"github.com/ethersphere/bee/v2/pkg/file/redundancy"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
+	"github.com/ethersphere/bee/v2/pkg/postage"
+	"github.com/ethersphere/bee/v2/pkg/storage"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/tracing"
 	"github.com/gorilla/mux"
+	"github.com/opentracing/opentracing-go/ext"
+	olog "github.com/opentracing/opentracing-go/log"
 )
 
 type bytesPostResponse struct {
@@ -28,18 +30,55 @@ type bytesPostResponse struct {
 
 // bytesUploadHandler handles upload of raw binary data of arbitrary length.
 func (s *Service) bytesUploadHandler(w http.ResponseWriter, r *http.Request) {
-	logger := tracing.NewLoggerWithTraceID(r.Context(), s.logger.WithName("post_bytes").Build())
+	span, logger, ctx := s.tracer.StartSpanFromContext(r.Context(), "post_bytes", s.logger.WithName("post_bytes").Build())
+	defer span.Finish()
 
 	headers := struct {
-		ContentType string `map:"Content-Type" validate:"excludes=multipart/form-data"`
-		SwarmTag    string `map:"Swarm-Tag"`
+		BatchID        []byte           `map:"Swarm-Postage-Batch-Id" validate:"required"`
+		SwarmTag       uint64           `map:"Swarm-Tag"`
+		Pin            bool             `map:"Swarm-Pin"`
+		Deferred       *bool            `map:"Swarm-Deferred-Upload"`
+		Encrypt        bool             `map:"Swarm-Encrypt"`
+		RLevel         redundancy.Level `map:"Swarm-Redundancy-Level"`
+		Act            bool             `map:"Swarm-Act"`
+		HistoryAddress swarm.Address    `map:"Swarm-Act-History-Address"`
 	}{}
 	if response := s.mapStructure(r.Header, &headers); response != nil {
 		response("invalid header params", logger, w)
 		return
 	}
 
-	putter, wait, err := s.newStamperPutter(r)
+	var (
+		tag      uint64
+		err      error
+		deferred = defaultUploadMethod(headers.Deferred)
+	)
+
+	ctx = redundancy.SetLevelInContext(ctx, headers.RLevel)
+
+	if deferred || headers.Pin {
+		tag, err = s.getOrCreateSessionID(headers.SwarmTag)
+		if err != nil {
+			logger.Debug("get or create tag failed", "error", err)
+			logger.Error(nil, "get or create tag failed")
+			switch {
+			case errors.Is(err, storage.ErrNotFound):
+				jsonhttp.NotFound(w, "tag not found")
+			default:
+				jsonhttp.InternalServerError(w, "cannot get or create tag")
+			}
+			ext.LogError(span, err, olog.String("action", "tag.create"))
+			return
+		}
+		span.SetTag("tagID", tag)
+	}
+
+	putter, err := s.newStamperPutter(ctx, putterOptions{
+		BatchID:  headers.BatchID,
+		TagID:    tag,
+		Pin:      headers.Pin,
+		Deferred: deferred,
+	})
 	if err != nil {
 		logger.Debug("get putter failed", "error", err)
 		logger.Error(nil, "get putter failed")
@@ -55,80 +94,70 @@ func (s *Service) bytesUploadHandler(w http.ResponseWriter, r *http.Request) {
 		default:
 			jsonhttp.BadRequest(w, nil)
 		}
+		ext.LogError(span, err, olog.String("action", "new.StamperPutter"))
 		return
 	}
 
-	tag, created, err := s.getOrCreateTag(headers.SwarmTag)
-	if err != nil {
-		logger.Debug("get or create tag failed", "error", err)
-		logger.Error(nil, "get or create tag failed")
-		switch {
-		case errors.Is(err, tags.ErrNotFound):
-			jsonhttp.NotFound(w, "tag not found")
-		default:
-			jsonhttp.InternalServerError(w, "cannot get or create tag")
-		}
-		return
+	ow := &cleanupOnErrWriter{
+		ResponseWriter: w,
+		onErr:          putter.Cleanup,
+		logger:         logger,
 	}
 
-	if !created {
-		// only in the case when tag is sent via header (i.e. not created by this request)
-		if estimatedTotalChunks := requestCalculateNumberOfChunks(r); estimatedTotalChunks > 0 {
-			err = tag.IncN(tags.TotalChunks, estimatedTotalChunks)
-			if err != nil {
-				logger.Debug("increment tag failed", "error", err)
-				logger.Error(nil, "increment tag failed")
-				jsonhttp.InternalServerError(w, "increment tag failed")
-				return
-			}
-		}
-	}
-
-	// Add the tag to the context
-	ctx := sctx.SetTag(r.Context(), tag)
-	p := requestPipelineFn(putter, r)
-	address, err := p(ctx, r.Body)
+	p := requestPipelineFn(putter, headers.Encrypt, headers.RLevel)
+	reference, err := p(ctx, r.Body)
 	if err != nil {
 		logger.Debug("split write all failed", "error", err)
 		logger.Error(nil, "split write all failed")
 		switch {
 		case errors.Is(err, postage.ErrBucketFull):
-			jsonhttp.PaymentRequired(w, "batch is overissued")
+			jsonhttp.PaymentRequired(ow, "batch is over issued")
 		default:
-			jsonhttp.InternalServerError(w, "split write all failed")
+			jsonhttp.InternalServerError(ow, "split write all failed")
 		}
-		return
-	}
-	if err = wait(); err != nil {
-		logger.Debug("sync chunks failed", "error", err)
-		logger.Error(nil, "sync chunks failed")
-		jsonhttp.InternalServerError(w, "sync chunks failed")
+		ext.LogError(span, err, olog.String("action", "split.WriteAll"))
 		return
 	}
 
-	if created {
-		_, err = tag.DoneSplit(address)
+	encryptedReference := reference
+	if headers.Act {
+		encryptedReference, err = s.actEncryptionHandler(r.Context(), w, putter, reference, headers.HistoryAddress)
 		if err != nil {
-			logger.Debug("done split failed", "error", err)
-			logger.Error(nil, "done split failed")
-			jsonhttp.InternalServerError(w, "done split filed")
+			logger.Debug("access control upload failed", "error", err)
+			logger.Error(nil, "access control upload failed")
+			switch {
+			case errors.Is(err, accesscontrol.ErrNotFound):
+				jsonhttp.NotFound(w, "act or history entry not found")
+			case errors.Is(err, accesscontrol.ErrInvalidPublicKey) || errors.Is(err, accesscontrol.ErrSecretKeyInfinity):
+				jsonhttp.BadRequest(w, "invalid public key")
+			case errors.Is(err, accesscontrol.ErrUnexpectedType):
+				jsonhttp.BadRequest(w, "failed to create history")
+			default:
+				jsonhttp.InternalServerError(w, errActUpload)
+			}
 			return
 		}
 	}
+	span.SetTag("root_address", encryptedReference)
 
-	if requestPin(r) {
-		if err := s.pinning.CreatePin(ctx, address, false); err != nil {
-			logger.Debug("pin creation failed", "address", address, "error", err)
-			logger.Error(nil, "pin creation failed")
-			jsonhttp.InternalServerError(w, "create ping failed")
-			return
-		}
+	err = putter.Done(reference)
+	if err != nil {
+		logger.Debug("done split failed", "error", err)
+		logger.Error(nil, "done split failed")
+		jsonhttp.InternalServerError(ow, "done split failed")
+		ext.LogError(span, err, olog.String("action", "putter.Done"))
+		return
 	}
 
-	w.Header().Set(SwarmTagHeader, fmt.Sprint(tag.Uid))
+	if tag != 0 {
+		w.Header().Set(SwarmTagHeader, fmt.Sprint(tag))
+	}
+
+	span.LogFields(olog.Bool("success", true))
+
 	w.Header().Set("Access-Control-Expose-Headers", SwarmTagHeader)
 	jsonhttp.Created(w, bytesPostResponse{
-		Reference: address,
+		Reference: encryptedReference,
 	})
 }
 
@@ -144,11 +173,16 @@ func (s *Service) bytesGetHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	additionalHeaders := http.Header{
-		"Content-Type": {"application/octet-stream"},
+	address := paths.Address
+	if v := getAddressFromContext(r.Context()); !v.IsZero() {
+		address = v
 	}
 
-	s.downloadHandler(logger, w, r, paths.Address, additionalHeaders, true)
+	additionalHeaders := http.Header{
+		ContentTypeHeader: {"application/octet-stream"},
+	}
+
+	s.downloadHandler(logger, w, r, address, additionalHeaders, true, false, nil)
 }
 
 func (s *Service) bytesHeadHandler(w http.ResponseWriter, r *http.Request) {
@@ -158,27 +192,33 @@ func (s *Service) bytesHeadHandler(w http.ResponseWriter, r *http.Request) {
 		Address swarm.Address `map:"address,resolve" validate:"required"`
 	}{}
 	if response := s.mapStructure(mux.Vars(r), &paths); response != nil {
-		response("invalid path params", logger, w)
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	ch, err := s.storer.Get(r.Context(), storage.ModeGetRequest, paths.Address)
+	address := paths.Address
+	if v := getAddressFromContext(r.Context()); !v.IsZero() {
+		address = v
+	}
+
+	getter := s.storer.Download(true)
+	ch, err := getter.Get(r.Context(), address)
 	if err != nil {
-		logger.Debug("get root chunk failed", "chunk_address", paths.Address, "error", err)
-		logger.Error(nil, "get rook chunk failed")
+		logger.Debug("get root chunk failed", "chunk_address", address, "error", err)
+		logger.Error(nil, "get root chunk failed")
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+
 	w.Header().Add("Access-Control-Expose-Headers", "Accept-Ranges, Content-Encoding")
-	w.Header().Add("Content-Type", "application/octet-stream")
+	w.Header().Add(ContentTypeHeader, "application/octet-stream")
 	var span int64
 
 	if cac.Valid(ch) {
 		span = int64(binary.LittleEndian.Uint64(ch.Data()[:swarm.SpanSize]))
 	} else {
-		// soc
 		span = int64(len(ch.Data()))
 	}
-	w.Header().Set("Content-Length", strconv.FormatInt(span, 10))
+	w.Header().Set(ContentLengthHeader, strconv.FormatInt(span, 10))
 	w.WriteHeader(http.StatusOK) // HEAD requests do not write a body
 }

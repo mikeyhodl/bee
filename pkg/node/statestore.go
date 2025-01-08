@@ -9,38 +9,63 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/ethersphere/bee/pkg/log"
-	"github.com/ethersphere/bee/pkg/statestore/leveldb"
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/ethersphere/bee/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/metrics"
+	"github.com/ethersphere/bee/v2/pkg/statestore/storeadapter"
+	"github.com/ethersphere/bee/v2/pkg/storage"
+	"github.com/ethersphere/bee/v2/pkg/storage/cache"
+	"github.com/ethersphere/bee/v2/pkg/storage/leveldbstore"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
 )
 
 // InitStateStore will initialize the stateStore with the given path to the
 // data directory. When given an empty directory path, the function will instead
 // initialize an in-memory state store that will not be persisted.
-func InitStateStore(logger log.Logger, dataDir string) (storage.StateStorer, error) {
+func InitStateStore(logger log.Logger, dataDir string, cacheCapacity uint64) (storage.StateStorerManager, metrics.Collector, error) {
 	if dataDir == "" {
 		logger.Warning("using in-mem state store, no node state will be persisted")
-		return leveldb.NewInMemoryStateStore(logger)
+	} else {
+		dataDir = filepath.Join(dataDir, "statestore")
 	}
-	return leveldb.NewStateStore(filepath.Join(dataDir, "statestore"), logger)
-}
-
-const secureOverlayKey = "non-mineable-overlay"
-const noncedOverlayKey = "nonce-overlay"
-
-func GetExistingOverlay(storer storage.StateStorer) (swarm.Address, error) {
-	var storedOverlay swarm.Address
-	err := storer.Get(secureOverlayKey, &storedOverlay)
+	ldb, err := leveldbstore.New(dataDir, nil)
 	if err != nil {
-		return swarm.ZeroAddress, err
+		return nil, nil, err
 	}
 
-	return storedOverlay, nil
+	caching, err := cache.Wrap(ldb, int(cacheCapacity))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	stateStore, err := storeadapter.NewStateStorerAdapter(caching)
+
+	return stateStore, caching, err
 }
 
-// CheckOverlayWithStore checks the overlay is the same as stored in the statestore
-func CheckOverlayWithStore(overlay swarm.Address, storer storage.StateStorer) error {
+// InitStamperStore will create new stamper store with the given path to the
+// data directory. When given an empty directory path, the function will instead
+// initialize an in-memory state store that will not be persisted.
+func InitStamperStore(logger log.Logger, dataDir string, stateStore storage.StateStorer) (storage.Store, error) {
+	if dataDir == "" {
+		logger.Warning("using in-mem stamper store, no node state will be persisted")
+	} else {
+		dataDir = filepath.Join(dataDir, "stamperstore")
+	}
+	stamperStore, err := leveldbstore.New(dataDir, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return stamperStore, nil
+}
+
+const (
+	overlayNonce     = "overlayV2_nonce"
+	noncedOverlayKey = "nonce-overlay"
+)
+
+// checkOverlay checks the overlay is the same as stored in the statestore
+func checkOverlay(storer storage.StateStorer, overlay swarm.Address) error {
 
 	var storedOverlay swarm.Address
 	err := storer.Get(noncedOverlayKey, &storedOverlay)
@@ -58,24 +83,20 @@ func CheckOverlayWithStore(overlay swarm.Address, storer storage.StateStorer) er
 	return nil
 }
 
-// SetOverlayInStore sets the overlay stored in the statestore (for purpose of overlay migration)
-func SetOverlayInStore(overlay swarm.Address, storer storage.StateStorer) error {
-	return storer.Put(noncedOverlayKey, overlay)
-}
-
-const OverlayNonce = "overlayV2_nonce"
-
 func overlayNonceExists(s storage.StateStorer) ([]byte, bool, error) {
-	overlayNonce := make([]byte, 32)
-	if err := s.Get(OverlayNonce, &overlayNonce); err != nil {
+	nonce := make([]byte, 32)
+	if err := s.Get(overlayNonce, &nonce); err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			return overlayNonce, false, nil
+			return nonce, false, nil
 		}
 		return nil, false, err
 	}
-	return overlayNonce, true, nil
+	return nonce, true, nil
 }
 
-func setOverlayNonce(s storage.StateStorer, overlayNonce []byte) error {
-	return s.Put(OverlayNonce, overlayNonce)
+func setOverlay(s storage.StateStorer, overlay swarm.Address, nonce []byte) error {
+	return errors.Join(
+		s.Put(overlayNonce, nonce),
+		s.Put(noncedOverlayKey, overlay),
+	)
 }

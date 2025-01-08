@@ -9,18 +9,18 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/ethersphere/bee/pkg/crypto"
-	"github.com/ethersphere/bee/pkg/feeds"
-	"github.com/ethersphere/bee/pkg/feeds/epochs"
-	feedstesting "github.com/ethersphere/bee/pkg/feeds/testing"
-	"github.com/ethersphere/bee/pkg/storage/mock"
+	"github.com/ethersphere/bee/v2/pkg/crypto"
+	"github.com/ethersphere/bee/v2/pkg/feeds"
+	"github.com/ethersphere/bee/v2/pkg/feeds/epochs"
+	feedstesting "github.com/ethersphere/bee/v2/pkg/feeds/testing"
+	"github.com/ethersphere/bee/v2/pkg/storage/inmemchunkstore"
 )
 
 func BenchmarkFinder(b *testing.B) {
 	for _, i := range []int{0, 8, 30} {
 		for _, prefill := range []int64{1, 50} {
-			after := int64(50)
-			storer := &feedstesting.Timeout{Storer: mock.NewStorer()}
+			after := uint64(50)
+			storer := &feedstesting.Timeout{ChunkStore: inmemchunkstore.New()}
 			topicStr := "testtopic"
 			topic, err := crypto.LegacyKeccak256([]byte(topicStr))
 			if err != nil {
@@ -45,7 +45,7 @@ func BenchmarkFinder(b *testing.B) {
 				}
 			}
 			latest := after + (1 << i)
-			err = updater.Update(ctx, latest, payload)
+			err = updater.Update(ctx, int64(latest), payload)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -59,7 +59,7 @@ func BenchmarkFinder(b *testing.B) {
 					names := []string{"sync", "async"}
 					b.Run(fmt.Sprintf("%s:prefill=%d, latest=%d, now=%d", names[k], prefill, latest, now), func(b *testing.B) {
 						for n := 0; n < b.N; n++ {
-							_, _, _, err := finder.At(ctx, now, after)
+							_, _, _, err := finder.At(ctx, int64(now), after)
 							if err != nil {
 								b.Fatal(err)
 							}

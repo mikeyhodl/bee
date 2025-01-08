@@ -9,16 +9,16 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/ethersphere/bee/pkg/crypto"
-	"github.com/ethersphere/bee/pkg/feeds"
-	"github.com/ethersphere/bee/pkg/feeds/sequence"
-	feedstesting "github.com/ethersphere/bee/pkg/feeds/testing"
-	"github.com/ethersphere/bee/pkg/storage/mock"
+	"github.com/ethersphere/bee/v2/pkg/crypto"
+	"github.com/ethersphere/bee/v2/pkg/feeds"
+	"github.com/ethersphere/bee/v2/pkg/feeds/sequence"
+	feedstesting "github.com/ethersphere/bee/v2/pkg/feeds/testing"
+	"github.com/ethersphere/bee/v2/pkg/storage/inmemchunkstore"
 )
 
 func BenchmarkFinder(b *testing.B) {
 	for _, prefill := range []int64{1, 100, 1000, 5000} {
-		storer := &feedstesting.Timeout{Storer: mock.NewStorer()}
+		storer := &feedstesting.Timeout{ChunkStore: inmemchunkstore.New()}
 		topicStr := "testtopic"
 		topic, err := crypto.LegacyKeccak256([]byte(topicStr))
 		if err != nil {

@@ -5,9 +5,9 @@
 package kademlia
 
 import (
-	"github.com/ethersphere/bee/pkg/swarm"
-	"github.com/ethersphere/bee/pkg/topology"
-	"github.com/ethersphere/bee/pkg/topology/pslice"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/topology"
+	"github.com/ethersphere/bee/v2/pkg/topology/pslice"
 )
 
 var (
@@ -23,10 +23,23 @@ const (
 	DefaultOverSaturationPeers = defaultOverSaturationPeers
 )
 
-type PeerFilterFunc = peerFilterFunc
+type PeerExcludeFunc = peerExcludeFunc
+type ExcludeFunc = excludeFunc
 
-func (k *Kad) IsWithinDepth(addr swarm.Address) bool {
-	return swarm.Proximity(k.base.Bytes(), addr.Bytes()) >= k.NeighborhoodDepth()
+func (k *Kad) IsWithinConnectionDepth(addr swarm.Address) bool {
+	return swarm.Proximity(k.base.Bytes(), addr.Bytes()) >= k.ConnectionDepth()
+}
+
+func (k *Kad) ConnectionDepth() uint8 {
+	k.depthMu.RLock()
+	defer k.depthMu.RUnlock()
+	return k.depth
+}
+
+func (k *Kad) StorageRadius() uint8 {
+	k.depthMu.RLock()
+	defer k.depthMu.RUnlock()
+	return k.storageRadius
 }
 
 // IsBalanced returns if Kademlia is balanced to bin.
@@ -79,4 +92,8 @@ func closestPeer(peers *pslice.PSlice, addr swarm.Address) (swarm.Address, error
 	}
 
 	return closest, nil
+}
+
+func (k *Kad) Trigger() {
+	k.manageC <- struct{}{}
 }

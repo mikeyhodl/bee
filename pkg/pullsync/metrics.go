@@ -5,17 +5,22 @@
 package pullsync
 
 import (
-	m "github.com/ethersphere/bee/pkg/metrics"
+	m "github.com/ethersphere/bee/v2/pkg/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 type metrics struct {
-	Offered       prometheus.Counter   // number of chunks offered
-	Wanted        prometheus.Counter   // number of chunks wanted
-	Delivered     prometheus.Counter   // number of chunk deliveries
-	DbOps         prometheus.Counter   // number of db ops
-	DuplicateRuid prometheus.Counter   // number of duplicate RUID requests we got
-	LastReceived  *prometheus.GaugeVec // last timestamp of the received chunks per bin
+	Offered              prometheus.Counter     // number of chunks offered
+	Wanted               prometheus.Counter     // number of chunks wanted
+	MissingChunks        prometheus.Counter     // number of reserve get errs
+	ReceivedZeroAddress  prometheus.Counter     // number of delivered chunks with invalid address
+	ReceivedInvalidChunk prometheus.Counter     // number of delivered chunks with invalid address
+	Delivered            prometheus.Counter     // number of chunk deliveries
+	SentOffered          prometheus.Counter     // number of chunks offered
+	SentWanted           prometheus.Counter     // number of chunks wanted
+	Sent                 prometheus.Counter     // number of chunks sent
+	DuplicateRuid        prometheus.Counter     // number of duplicate RUID requests we got
+	LastReceived         *prometheus.CounterVec // last timestamp of the received chunks per bin
 }
 
 func newMetrics() metrics {
@@ -34,17 +39,47 @@ func newMetrics() metrics {
 			Name:      "chunks_wanted",
 			Help:      "Total chunks wanted.",
 		}),
+		MissingChunks: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "missing_chunks",
+			Help:      "Total reserve get errors.",
+		}),
+		ReceivedZeroAddress: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "received_zero_address",
+			Help:      "Total chunks delivered with zero address and no chunk data.",
+		}),
+		ReceivedInvalidChunk: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "received_invalid_chunks",
+			Help:      "Total invalid chunks delivered.",
+		}),
 		Delivered: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,
 			Subsystem: subsystem,
 			Name:      "chunks_delivered",
 			Help:      "Total chunks delivered.",
 		}),
-		DbOps: prometheus.NewCounter(prometheus.CounterOpts{
+		SentOffered: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,
 			Subsystem: subsystem,
-			Name:      "db_ops",
-			Help:      "Total Db Ops.",
+			Name:      "chunks_sent_offered",
+			Help:      "Total chunks offered to peers.",
+		}),
+		SentWanted: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "chunks_sent_wanted",
+			Help:      "Total chunks wanted by peers.",
+		}),
+		Sent: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: m.Namespace,
+			Subsystem: subsystem,
+			Name:      "chunks_sent",
+			Help:      "Total chunks sent.",
 		}),
 		DuplicateRuid: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,
@@ -52,8 +87,8 @@ func newMetrics() metrics {
 			Name:      "duplicate_ruids",
 			Help:      "Total duplicate RUIDs.",
 		}),
-		LastReceived: prometheus.NewGaugeVec(
-			prometheus.GaugeOpts{
+		LastReceived: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
 				Namespace: m.Namespace,
 				Subsystem: subsystem,
 				Name:      "last_received",

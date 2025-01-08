@@ -11,24 +11,26 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"testing"
 
-	"github.com/ethersphere/bee/pkg/api"
-	"github.com/ethersphere/bee/pkg/feeds"
-	"github.com/ethersphere/bee/pkg/file/loadsave"
-	"github.com/ethersphere/bee/pkg/jsonhttp"
-	"github.com/ethersphere/bee/pkg/jsonhttp/jsonhttptest"
-	"github.com/ethersphere/bee/pkg/log"
-	"github.com/ethersphere/bee/pkg/manifest"
-	"github.com/ethersphere/bee/pkg/postage"
-	mockpost "github.com/ethersphere/bee/pkg/postage/mock"
-	testingsoc "github.com/ethersphere/bee/pkg/soc/testing"
-	statestore "github.com/ethersphere/bee/pkg/statestore/mock"
-	"github.com/ethersphere/bee/pkg/storage/mock"
-	"github.com/ethersphere/bee/pkg/swarm"
-	"github.com/ethersphere/bee/pkg/tags"
+	"github.com/ethersphere/bee/v2/pkg/api"
+	"github.com/ethersphere/bee/v2/pkg/feeds"
+	"github.com/ethersphere/bee/v2/pkg/file/loadsave"
+	"github.com/ethersphere/bee/v2/pkg/file/splitter"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp/jsonhttptest"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/manifest"
+	"github.com/ethersphere/bee/v2/pkg/postage"
+	mockpost "github.com/ethersphere/bee/v2/pkg/postage/mock"
+	testingsoc "github.com/ethersphere/bee/v2/pkg/soc/testing"
+	testingc "github.com/ethersphere/bee/v2/pkg/storage/testing"
+	mockstorer "github.com/ethersphere/bee/v2/pkg/storer/mock"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/util/testutil"
 )
 
 const ownerString = "8d3766440f0d7b949a5e32995d09619a7f86e632"
@@ -45,43 +47,37 @@ func TestFeed_Get(t *testing.T) {
 			}
 			return fmt.Sprintf("/feeds/%s/%s", owner, topic)
 		}
-		mockStatestore = statestore.NewStateStore()
-		logger         = log.Noop
-		tag            = tags.NewTags(mockStatestore, logger)
-		mockStorer     = mock.NewStorer()
+		mockStorer = mockstorer.New()
 	)
+	putter, err := mockStorer.Upload(context.Background(), false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mockWrappedCh := testingc.FixtureChunk("0033")
+	err = putter.Put(context.Background(), mockWrappedCh)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	t.Run("with at", func(t *testing.T) {
 		t.Parallel()
 
 		var (
 			timestamp       = int64(12121212)
-			ch              = toChunk(t, uint64(timestamp), expReference.Bytes())
+			ch              = toChunk(t, uint64(timestamp), mockWrappedCh.Address().Bytes())
 			look            = newMockLookup(12, 0, ch, nil, &id{}, &id{})
 			factory         = newMockFactory(look)
 			idBytes, _      = (&id{}).MarshalBinary()
 			client, _, _, _ = newTestServer(t, testServerOptions{
 				Storer: mockStorer,
-				Tags:   tag,
 				Feeds:  factory,
 			})
 		)
 
-		respHeaders := jsonhttptest.Request(t, client, http.MethodGet, feedResource(ownerString, "aabbcc", "12"), http.StatusOK,
-			jsonhttptest.WithExpectedJSONResponse(api.FeedReferenceResponse{Reference: expReference}),
+		jsonhttptest.Request(t, client, http.MethodGet, feedResource(ownerString, "aabbcc", "12"), http.StatusOK,
+			jsonhttptest.WithExpectedResponse(mockWrappedCh.Data()[swarm.SpanSize:]),
+			jsonhttptest.WithExpectedResponseHeader(api.SwarmFeedIndexHeader, hex.EncodeToString(idBytes)),
 		)
-
-		h := respHeaders[api.SwarmFeedIndexHeader]
-		if len(h) == 0 {
-			t.Fatal("expected swarm feed index header to be set")
-		}
-		b, err := hex.DecodeString(h[0])
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(b, idBytes) {
-			t.Fatalf("feed index header mismatch. got %v want %v", b, idBytes)
-		}
 	})
 
 	t.Run("latest", func(t *testing.T) {
@@ -89,33 +85,113 @@ func TestFeed_Get(t *testing.T) {
 
 		var (
 			timestamp  = int64(12121212)
-			ch         = toChunk(t, uint64(timestamp), expReference.Bytes())
+			ch         = toChunk(t, uint64(timestamp), mockWrappedCh.Address().Bytes())
 			look       = newMockLookup(-1, 2, ch, nil, &id{}, &id{})
 			factory    = newMockFactory(look)
 			idBytes, _ = (&id{}).MarshalBinary()
 
 			client, _, _, _ = newTestServer(t, testServerOptions{
 				Storer: mockStorer,
-				Tags:   tag,
 				Feeds:  factory,
 			})
 		)
 
-		respHeaders := jsonhttptest.Request(t, client, http.MethodGet, feedResource(ownerString, "aabbcc", ""), http.StatusOK,
-			jsonhttptest.WithExpectedJSONResponse(api.FeedReferenceResponse{Reference: expReference}),
+		jsonhttptest.Request(t, client, http.MethodGet, feedResource(ownerString, "aabbcc", ""), http.StatusOK,
+			jsonhttptest.WithExpectedResponse(mockWrappedCh.Data()[swarm.SpanSize:]),
+			jsonhttptest.WithExpectedContentLength(len(mockWrappedCh.Data()[swarm.SpanSize:])),
+			jsonhttptest.WithExpectedResponseHeader(api.SwarmFeedIndexHeader, hex.EncodeToString(idBytes)),
+		)
+	})
+
+	t.Run("chunk wrapping", func(t *testing.T) {
+		t.Parallel()
+
+		testData := []byte{0, 1, 2, 3, 4, 5, 6, 7, 8}
+
+		var (
+			ch         = testingsoc.GenerateMockSOC(t, testData).Chunk()
+			look       = newMockLookup(-1, 2, ch, nil, &id{}, &id{})
+			factory    = newMockFactory(look)
+			idBytes, _ = (&id{}).MarshalBinary()
+
+			client, _, _, _ = newTestServer(t, testServerOptions{
+				Storer: mockStorer,
+				Feeds:  factory,
+			})
 		)
 
-		if h := respHeaders[api.SwarmFeedIndexHeader]; len(h) > 0 {
-			b, err := hex.DecodeString(h[0])
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !bytes.Equal(b, idBytes) {
-				t.Fatalf("feed index header mismatch. got %v want %v", b, idBytes)
-			}
-		} else {
-			t.Fatal("expected swarm feed index header to be set")
+		jsonhttptest.Request(t, client, http.MethodGet, feedResource(ownerString, "aabbcc", ""), http.StatusOK,
+			jsonhttptest.WithExpectedResponse(testData),
+			jsonhttptest.WithExpectedContentLength(len(testData)),
+			jsonhttptest.WithExpectedResponseHeader(api.SwarmFeedIndexHeader, hex.EncodeToString(idBytes)),
+		)
+	})
+
+	t.Run("legacy payload with non existing wrapped chunk", func(t *testing.T) {
+		t.Parallel()
+
+		wrappedRef := make([]byte, swarm.HashSize)
+		_ = copy(wrappedRef, mockWrappedCh.Address().Bytes())
+		wrappedRef[0]++
+
+		var (
+			ch      = toChunk(t, uint64(12121212), wrappedRef)
+			look    = newMockLookup(-1, 2, ch, nil, &id{}, &id{})
+			factory = newMockFactory(look)
+
+			client, _, _, _ = newTestServer(t, testServerOptions{
+				Storer: mockStorer,
+				Feeds:  factory,
+			})
+		)
+
+		jsonhttptest.Request(t, client, http.MethodGet, feedResource(ownerString, "aabbcc", ""), http.StatusNotFound)
+	})
+
+	t.Run("bigger payload than one chunk", func(t *testing.T) {
+		t.Parallel()
+
+		testDataLen := 5000
+		testData := testutil.RandBytesWithSeed(t, testDataLen, 1)
+		s := splitter.NewSimpleSplitter(putter)
+		addr, err := s.Split(context.Background(), io.NopCloser(bytes.NewReader(testData)), int64(testDataLen), false)
+		if err != nil {
+			t.Fatal(err)
 		}
+
+		// get root ch addr then add wrap it with soc
+		testRootCh, err := mockStorer.ChunkStore().Get(context.Background(), addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var (
+			ch         = testingsoc.GenerateMockSOCWithSpan(t, testRootCh.Data()).Chunk()
+			look       = newMockLookup(-1, 2, ch, nil, &id{}, &id{})
+			factory    = newMockFactory(look)
+			idBytes, _ = (&id{}).MarshalBinary()
+
+			client, _, _, _ = newTestServer(t, testServerOptions{
+				Storer: mockStorer,
+				Feeds:  factory,
+			})
+		)
+
+		t.Run("retrieve chunk tree", func(t *testing.T) {
+			jsonhttptest.Request(t, client, http.MethodGet, feedResource(ownerString, "aabbcc", ""), http.StatusOK,
+				jsonhttptest.WithExpectedResponse(testData),
+				jsonhttptest.WithExpectedContentLength(testDataLen),
+				jsonhttptest.WithExpectedResponseHeader(api.SwarmFeedIndexHeader, hex.EncodeToString(idBytes)),
+			)
+		})
+
+		t.Run("retrieve only wrapped chunk", func(t *testing.T) {
+			jsonhttptest.Request(t, client, http.MethodGet, feedResource(ownerString, "aabbcc", ""), http.StatusOK,
+				jsonhttptest.WithRequestHeader(api.SwarmOnlyRootChunk, "true"),
+				jsonhttptest.WithExpectedResponse(testRootCh.Data()),
+				jsonhttptest.WithExpectedContentLength(len(testRootCh.Data())),
+				jsonhttptest.WithExpectedResponseHeader(api.SwarmFeedIndexHeader, hex.EncodeToString(idBytes)),
+			)
+		})
 	})
 }
 
@@ -125,15 +201,12 @@ func TestFeed_Post(t *testing.T) {
 	// get the reference from the store, unmarshal to a
 	// manifest entry and make sure all metadata correct
 	var (
-		mockStatestore  = statestore.NewStateStore()
 		logger          = log.Noop
-		tag             = tags.NewTags(mockStatestore, logger)
 		topic           = "aabbcc"
 		mp              = mockpost.New(mockpost.WithIssuer(postage.NewStampIssuer("", "", batchOk, big.NewInt(3), 11, 10, 1000, true)))
-		mockStorer      = mock.NewStorer()
+		mockStorer      = mockstorer.New()
 		client, _, _, _ = newTestServer(t, testServerOptions{
 			Storer: mockStorer,
-			Tags:   tag,
 			Logger: logger,
 			Post:   mp,
 		})
@@ -148,7 +221,7 @@ func TestFeed_Post(t *testing.T) {
 			}),
 		)
 
-		ls := loadsave.NewReadonly(mockStorer)
+		ls := loadsave.NewReadonly(mockStorer.ChunkStore())
 		i, err := manifest.NewMantarayManifestReference(expReference, ls)
 		if err != nil {
 			t.Fatal(err)
@@ -172,11 +245,11 @@ func TestFeed_Post(t *testing.T) {
 	t.Run("postage", func(t *testing.T) {
 		t.Run("err - bad batch", func(t *testing.T) {
 			hexbatch := hex.EncodeToString(batchInvalid)
-			jsonhttptest.Request(t, client, http.MethodPost, url, http.StatusBadRequest,
+			jsonhttptest.Request(t, client, http.MethodPost, url, http.StatusNotFound,
 				jsonhttptest.WithRequestHeader(api.SwarmPostageBatchIdHeader, hexbatch),
 				jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
-					Message: "invalid batch id",
-					Code:    http.StatusBadRequest,
+					Message: "batch with id not found",
+					Code:    http.StatusNotFound,
 				}))
 		})
 
@@ -198,19 +271,14 @@ func TestFeed_Post(t *testing.T) {
 }
 
 // TestDirectUploadFeed tests that the direct upload endpoint give correct error message in dev mode
-func TestDirectUploadFeed(t *testing.T) {
+func TestFeedDirectUpload(t *testing.T) {
 	t.Parallel()
 	var (
-		mockStatestore  = statestore.NewStateStore()
-		logger          = log.Noop
-		tag             = tags.NewTags(mockStatestore, logger)
 		topic           = "aabbcc"
 		mp              = mockpost.New(mockpost.WithIssuer(postage.NewStampIssuer("", "", batchOk, big.NewInt(3), 11, 10, 1000, true)))
-		mockStorer      = mock.NewStorer()
+		mockStorer      = mockstorer.New()
 		client, _, _, _ = newTestServer(t, testServerOptions{
 			Storer:  mockStorer,
-			Tags:    tag,
-			Logger:  logger,
 			Post:    mp,
 			BeeMode: api.DevMode,
 		})
@@ -249,17 +317,18 @@ func (f *factoryMock) NewLookup(t feeds.Type, feed *feeds.Feed) (feeds.Lookup, e
 }
 
 type mockLookup struct {
-	at, after int64
+	at        int64
+	after     uint64
 	chunk     swarm.Chunk
 	err       error
 	cur, next feeds.Index
 }
 
-func newMockLookup(at, after int64, ch swarm.Chunk, err error, cur, next feeds.Index) *mockLookup {
+func newMockLookup(at int64, after uint64, ch swarm.Chunk, err error, cur, next feeds.Index) *mockLookup {
 	return &mockLookup{at: at, after: after, chunk: ch, err: err, cur: cur, next: next}
 }
 
-func (l *mockLookup) At(_ context.Context, at, after int64) (swarm.Chunk, feeds.Index, feeds.Index, error) {
+func (l *mockLookup) At(_ context.Context, at int64, after uint64) (swarm.Chunk, feeds.Index, feeds.Index, error) {
 	if l.at == -1 {
 		// shortcut to ignore the value in the call since time.Now() is a moving target
 		return l.chunk, l.cur, l.next, nil

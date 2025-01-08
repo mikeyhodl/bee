@@ -9,9 +9,9 @@ import (
 	"errors"
 	"time"
 
-	"github.com/ethersphere/bee/pkg/bzz"
-	"github.com/ethersphere/bee/pkg/p2p"
-	"github.com/ethersphere/bee/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/bzz"
+	"github.com/ethersphere/bee/v2/pkg/p2p"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
 	ma "github.com/multiformats/go-multiaddr"
 )
 
@@ -21,7 +21,7 @@ type Service struct {
 	connectFunc           func(ctx context.Context, addr ma.Multiaddr) (address *bzz.Address, err error)
 	disconnectFunc        func(overlay swarm.Address, reason string) error
 	peersFunc             func() []p2p.Peer
-	blocklistedPeersFunc  func() ([]p2p.Peer, error)
+	blocklistedPeersFunc  func() ([]p2p.BlockListedPeer, error)
 	addressesFunc         func() ([]ma.Multiaddr, error)
 	notifierFunc          p2p.PickyNotifier
 	setWelcomeMessageFunc func(string) error
@@ -59,13 +59,13 @@ func WithPeersFunc(f func() []p2p.Peer) Option {
 }
 
 // WithBlocklistedPeersFunc sets the mock implementation of the BlocklistedPeers function
-func WithBlocklistedPeersFunc(f func() ([]p2p.Peer, error)) Option {
+func WithBlocklistedPeersFunc(f func() ([]p2p.BlockListedPeer, error)) Option {
 	return optionFunc(func(s *Service) {
 		s.blocklistedPeersFunc = f
 	})
 }
 
-// WithAddressesFunc sets the mock implementation of the Adresses function
+// WithAddressesFunc sets the mock implementation of the Addresses function
 func WithAddressesFunc(f func() ([]ma.Multiaddr, error)) Option {
 	return optionFunc(func(s *Service) {
 		s.addressesFunc = f
@@ -145,7 +145,7 @@ func (s *Service) Blocklisted(overlay swarm.Address) (bool, error) {
 	return false, nil
 }
 
-func (s *Service) BlocklistedPeers() ([]p2p.Peer, error) {
+func (s *Service) BlocklistedPeers() ([]p2p.BlockListedPeer, error) {
 	if s.blocklistedPeersFunc == nil {
 		return nil, nil
 	}

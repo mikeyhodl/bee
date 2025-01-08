@@ -14,19 +14,19 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethersphere/bee/pkg/log"
-	"github.com/ethersphere/bee/pkg/postage"
-	mockbatchstore "github.com/ethersphere/bee/pkg/postage/batchstore/mock"
-	contractMock "github.com/ethersphere/bee/pkg/postage/postagecontract/mock"
-	erc20mock "github.com/ethersphere/bee/pkg/settlement/swap/erc20/mock"
-	statestore "github.com/ethersphere/bee/pkg/statestore/mock"
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/ethersphere/bee/pkg/storageincentives"
-	"github.com/ethersphere/bee/pkg/storageincentives/redistribution"
-	"github.com/ethersphere/bee/pkg/storageincentives/staking/mock"
-	"github.com/ethersphere/bee/pkg/swarm"
-	transactionmock "github.com/ethersphere/bee/pkg/transaction/mock"
-	"github.com/ethersphere/bee/pkg/util/testutil"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/postage"
+	contractMock "github.com/ethersphere/bee/v2/pkg/postage/postagecontract/mock"
+	erc20mock "github.com/ethersphere/bee/v2/pkg/settlement/swap/erc20/mock"
+	statestore "github.com/ethersphere/bee/v2/pkg/statestore/mock"
+	"github.com/ethersphere/bee/v2/pkg/storageincentives"
+	"github.com/ethersphere/bee/v2/pkg/storageincentives/redistribution"
+	"github.com/ethersphere/bee/v2/pkg/storageincentives/staking/mock"
+	"github.com/ethersphere/bee/v2/pkg/storer"
+	resMock "github.com/ethersphere/bee/v2/pkg/storer/mock"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+	transactionmock "github.com/ethersphere/bee/v2/pkg/transaction/mock"
+	"github.com/ethersphere/bee/v2/pkg/util/testutil"
 )
 
 func TestAgent(t *testing.T) {
@@ -41,53 +41,59 @@ func TestAgent(t *testing.T) {
 		limit          uint64
 		expectedCalls  bool
 		balance        *big.Int
-	}{{
-		name:           "3 blocks per phase, same block number returns twice",
-		blocksPerRound: 9,
-		blocksPerPhase: 3,
-		incrementBy:    1,
-		expectedCalls:  true,
-		limit:          108, // computed with blocksPerRound * (exptectedCalls + 2)
-		balance:        bigBalance,
-	}, {
-		name:           "3 blocks per phase, block number returns every block",
-		blocksPerRound: 9,
-		blocksPerPhase: 3,
-		incrementBy:    1,
-		expectedCalls:  true,
-		limit:          108,
-		balance:        bigBalance,
-	}, {
-		name:           "no expected calls - block number returns late after each phase",
-		blocksPerRound: 9,
-		blocksPerPhase: 3,
-		incrementBy:    6,
-		expectedCalls:  false,
-		limit:          108,
-		balance:        bigBalance,
-	}, {
-		name:           "4 blocks per phase, block number returns every other block",
-		blocksPerRound: 12,
-		blocksPerPhase: 4,
-		incrementBy:    2,
-		expectedCalls:  true,
-		limit:          144,
-		balance:        bigBalance,
-	}, {
-		// This test case is based on previous, but this time agent will not have enough
-		// balance to participate in the game so no calls are going to be made.
-		name:           "no expected calls - insufficient balance",
-		blocksPerRound: 12,
-		blocksPerPhase: 4,
-		incrementBy:    2,
-		expectedCalls:  false,
-		limit:          144,
-		balance:        big.NewInt(0),
-	},
+		doubling       uint8
+	}{
+		{
+			name:           "3 blocks per phase, same block number returns twice",
+			blocksPerRound: 9,
+			blocksPerPhase: 3,
+			incrementBy:    1,
+			expectedCalls:  true,
+			limit:          108, // computed with blocksPerRound * (exptectedCalls + 2)
+			balance:        bigBalance,
+			doubling:       1,
+		}, {
+			name:           "3 blocks per phase, block number returns every block",
+			blocksPerRound: 9,
+			blocksPerPhase: 3,
+			incrementBy:    1,
+			expectedCalls:  true,
+			limit:          108,
+			balance:        bigBalance,
+			doubling:       0,
+		}, {
+			name:           "no expected calls - block number returns late after each phase",
+			blocksPerRound: 9,
+			blocksPerPhase: 3,
+			incrementBy:    6,
+			expectedCalls:  false,
+			limit:          108,
+			balance:        bigBalance,
+			doubling:       0,
+		}, {
+			name:           "4 blocks per phase, block number returns every other block",
+			blocksPerRound: 12,
+			blocksPerPhase: 4,
+			incrementBy:    2,
+			expectedCalls:  true,
+			limit:          144,
+			balance:        bigBalance,
+			doubling:       1,
+		}, {
+			// This test case is based on previous, but this time agent will not have enough
+			// balance to participate in the game so no calls are going to be made.
+			name:           "no expected calls - insufficient balance",
+			blocksPerRound: 12,
+			blocksPerPhase: 4,
+			incrementBy:    2,
+			expectedCalls:  false,
+			limit:          144,
+			balance:        big.NewInt(0),
+			doubling:       1,
+		},
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -106,9 +112,12 @@ func TestAgent(t *testing.T) {
 				block:       tc.blocksPerRound,
 				balance:     tc.balance,
 			}
-			contract := &mockContract{}
 
-			service, _ := createService(t, addr, backend, contract, tc.blocksPerRound, tc.blocksPerPhase)
+			var radius uint8 = 8
+
+			contract := &mockContract{t: t, expectedRadius: radius + tc.doubling}
+
+			service, _ := createService(t, addr, backend, contract, tc.blocksPerRound, tc.blocksPerPhase, radius, tc.doubling)
 			testutil.CleanupCloser(t, service)
 
 			<-wait
@@ -156,7 +165,10 @@ func createService(
 	backend storageincentives.ChainBackend,
 	contract redistribution.Contract,
 	blocksPerRound uint64,
-	blocksPerPhase uint64) (*storageincentives.Agent, error) {
+	blocksPerPhase uint64,
+	radius uint8,
+	doubling uint8,
+) (*storageincentives.Agent, error) {
 	t.Helper()
 
 	postageContract := contractMock.New(contractMock.WithExpiresBatchesFunc(func(context.Context) error {
@@ -167,7 +179,30 @@ func createService(
 		return false, nil
 	}))
 
-	return storageincentives.New(addr, common.Address{}, backend, log.Noop, &mockMonitor{}, contract, postageContract, stakingContract, mockbatchstore.New(mockbatchstore.WithReserveState(&postage.ReserveState{StorageRadius: 0})), &mockSampler{t: t}, time.Millisecond*10, blocksPerRound, blocksPerPhase, statestore.NewStateStore(), erc20mock.New(), transactionmock.New())
+	reserve := resMock.NewReserve(
+		resMock.WithRadius(radius),
+		resMock.WithSample(storer.RandSample(t, nil)),
+		resMock.WithCapacityDoubling(int(doubling)),
+	)
+
+	return storageincentives.New(
+		addr, common.Address{},
+		backend,
+		contract,
+		postageContract,
+		stakingContract,
+		reserve,
+		func() bool { return true },
+		time.Millisecond*100,
+		blocksPerRound,
+		blocksPerPhase,
+		statestore.NewStateStore(),
+		&postage.NoOpBatchStore{},
+		erc20mock.New(),
+		transactionmock.New(),
+		&mockHealth{},
+		log.Noop,
+	)
 }
 
 type mockchainBackend struct {
@@ -211,13 +246,6 @@ func (m *mockchainBackend) SuggestGasPrice(ctx context.Context) (*big.Int, error
 	return big.NewInt(4), nil
 }
 
-type mockMonitor struct {
-}
-
-func (m *mockMonitor) IsFullySynced() bool {
-	return true
-}
-
 type contractCall int
 
 func (c contractCall) String() string {
@@ -242,15 +270,20 @@ const (
 )
 
 type mockContract struct {
-	callsList []contractCall
-	mtx       sync.Mutex
+	callsList      []contractCall
+	mtx            sync.Mutex
+	expectedRadius uint8
+	t              *testing.T
 }
 
 func (m *mockContract) ReserveSalt(context.Context) ([]byte, error) {
 	return nil, nil
 }
 
-func (m *mockContract) IsPlaying(context.Context, uint8) (bool, error) {
+func (m *mockContract) IsPlaying(_ context.Context, r uint8) (bool, error) {
+	if r != m.expectedRadius {
+		m.t.Fatalf("isPlaying: expected radius %d, got %d", m.expectedRadius, r)
+	}
 	return true, nil
 }
 
@@ -261,33 +294,32 @@ func (m *mockContract) IsWinner(context.Context) (bool, error) {
 	return false, nil
 }
 
-func (m *mockContract) Claim(context.Context) (common.Hash, error) {
+func (m *mockContract) Claim(context.Context, redistribution.ChunkInclusionProofs) (common.Hash, error) {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 	m.callsList = append(m.callsList, claimCall)
 	return common.Hash{}, nil
 }
 
-func (m *mockContract) Commit(context.Context, []byte, *big.Int) (common.Hash, error) {
+func (m *mockContract) Commit(context.Context, []byte, uint64) (common.Hash, error) {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 	m.callsList = append(m.callsList, commitCall)
 	return common.Hash{}, nil
 }
 
-func (m *mockContract) Reveal(context.Context, uint8, []byte, []byte) (common.Hash, error) {
+func (m *mockContract) Reveal(_ context.Context, r uint8, _ []byte, _ []byte) (common.Hash, error) {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
+
+	if r != m.expectedRadius {
+		m.t.Fatalf("reveal: expected radius %d, got %d", m.expectedRadius, r)
+	}
+
 	m.callsList = append(m.callsList, revealCall)
 	return common.Hash{}, nil
 }
 
-type mockSampler struct {
-	t *testing.T
-}
+type mockHealth struct{}
 
-func (m *mockSampler) ReserveSample(context.Context, []byte, uint8, uint64) (storage.Sample, error) {
-	return storage.Sample{
-		Hash: swarm.RandAddress(m.t),
-	}, nil
-}
+func (m *mockHealth) IsHealthy() bool { return true }

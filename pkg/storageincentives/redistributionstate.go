@@ -12,17 +12,19 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethersphere/bee/pkg/log"
-	"github.com/ethersphere/bee/pkg/settlement/swap/erc20"
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/ethersphere/bee/pkg/transaction"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/settlement/swap/erc20"
+	"github.com/ethersphere/bee/v2/pkg/storage"
+	storer "github.com/ethersphere/bee/v2/pkg/storer"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/transaction"
 )
 
 const loggerNameNode = "nodestatus"
 
 const (
 	redistributionStatusKey = "redistribution_state"
-	saveStatusInterval      = time.Second
+	purgeStaleDataThreshold = 10
 )
 
 type RedistributionState struct {
@@ -39,23 +41,33 @@ type RedistributionState struct {
 
 // Status provide internal status of the nodes in the redistribution game
 type Status struct {
-	Phase           PhaseType
-	IsFrozen        bool
-	IsFullySynced   bool
-	Round           uint64
-	LastWonRound    uint64
-	LastPlayedRound uint64
-	LastFrozenRound uint64
-	Block           uint64
-	Reward          *big.Int
-	Fees            *big.Int
-	RoundData       map[uint64]RoundData
+	Phase             PhaseType
+	IsFrozen          bool
+	IsFullySynced     bool
+	Round             uint64
+	LastWonRound      uint64
+	LastPlayedRound   uint64
+	LastFrozenRound   uint64
+	LastSelectedRound uint64
+	Block             uint64
+	Reward            *big.Int
+	Fees              *big.Int
+	RoundData         map[uint64]RoundData
+	SampleDuration    time.Duration
+	IsHealthy         bool
 }
 
 type RoundData struct {
 	CommitKey   []byte
 	SampleData  *SampleData
 	HasRevealed bool
+}
+
+type SampleData struct {
+	Anchor1            []byte
+	ReserveSampleItems []storer.SampleItem
+	ReserveSampleHash  swarm.Address
+	StorageRadius      uint8
 }
 
 func NewStatus() *Status {
@@ -105,13 +117,26 @@ func (r *RedistributionState) save() {
 	}
 }
 
-func (r *RedistributionState) SetCurrentEvent(phase PhaseType, round uint64, block uint64) {
+func (r *RedistributionState) SetCurrentBlock(block uint64) {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	r.status.Block = block
+	r.save()
+}
+
+func (r *RedistributionState) SetCurrentEvent(phase PhaseType, round uint64) {
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
 	r.status.Phase = phase
 	r.status.Round = round
-	r.status.Block = block
 	r.save()
+}
+
+func (r *RedistributionState) IsFrozen() bool {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+
+	return r.status.IsFrozen
 }
 
 func (r *RedistributionState) SetFrozen(isFrozen bool, round uint64) {
@@ -131,7 +156,14 @@ func (r *RedistributionState) SetLastWonRound(round uint64) {
 	r.save()
 }
 
-func (r *RedistributionState) IsFullySynced(isSynced bool) {
+func (r *RedistributionState) IsFullySynced() bool {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+
+	return r.status.IsFullySynced
+}
+
+func (r *RedistributionState) SetFullySynced(isSynced bool) {
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
 	r.status.IsFullySynced = isSynced
@@ -142,6 +174,13 @@ func (r *RedistributionState) SetLastPlayedRound(round uint64) {
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
 	r.status.LastPlayedRound = round
+	r.save()
+}
+
+func (r *RedistributionState) SetLastSelectedRound(round uint64) {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	r.status.LastSelectedRound = round
 	r.save()
 }
 
@@ -183,9 +222,13 @@ func (r *RedistributionState) SetBalance(ctx context.Context) error {
 		r.logger.Debug("error getting balance", "error", err)
 		return err
 	}
+
 	r.mtx.Lock()
+	defer r.mtx.Unlock()
+
 	r.currentBalance.Set(currentBalance)
-	r.mtx.Unlock()
+	r.save()
+
 	return nil
 }
 
@@ -201,13 +244,14 @@ func (r *RedistributionState) SampleData(round uint64) (SampleData, bool) {
 	return *rd.SampleData, true
 }
 
-func (r *RedistributionState) SetSampleData(round uint64, sd SampleData) {
+func (r *RedistributionState) SetSampleData(round uint64, sd SampleData, dur time.Duration) {
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
 
 	rd := r.status.RoundData[round]
 	rd.SampleData = &sd
 	r.status.RoundData[round] = rd
+	r.status.SampleDuration = dur
 
 	r.save()
 }
@@ -243,6 +287,19 @@ func (r *RedistributionState) HasRevealed(round uint64) bool {
 	return rd.HasRevealed
 }
 
+func (r *RedistributionState) SetHealthy(isHealthy bool) {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	r.status.IsHealthy = isHealthy
+	r.save()
+}
+
+func (r *RedistributionState) IsHealthy() bool {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	return r.status.IsHealthy
+}
+
 func (r *RedistributionState) SetHasRevealed(round uint64) {
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
@@ -258,4 +315,36 @@ func (r *RedistributionState) currentRoundAndPhase() (uint64, PhaseType) {
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
 	return r.status.Round, r.status.Phase
+}
+
+func (r *RedistributionState) currentBlock() uint64 {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+
+	return r.status.Block
+}
+
+func (r *RedistributionState) purgeStaleRoundData() {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+
+	currentRound := r.status.Round
+
+	if currentRound <= purgeStaleDataThreshold {
+		return
+	}
+
+	thresholdRound := currentRound - purgeStaleDataThreshold
+	hasChanged := false
+
+	for round := range r.status.RoundData {
+		if round < thresholdRound {
+			delete(r.status.RoundData, round)
+			hasChanged = true
+		}
+	}
+
+	if hasChanged {
+		r.save()
+	}
 }

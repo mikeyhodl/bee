@@ -14,15 +14,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethersphere/bee/pkg/file/loadsave"
-	"github.com/ethersphere/bee/pkg/file/pipeline"
-	"github.com/ethersphere/bee/pkg/file/pipeline/builder"
-	"github.com/ethersphere/bee/pkg/manifest"
-	testingsoc "github.com/ethersphere/bee/pkg/soc/testing"
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/ethersphere/bee/pkg/storage/mock"
-	"github.com/ethersphere/bee/pkg/swarm"
-	"github.com/ethersphere/bee/pkg/traversal"
+	"github.com/ethersphere/bee/v2/pkg/file/loadsave"
+	"github.com/ethersphere/bee/v2/pkg/file/pipeline"
+	"github.com/ethersphere/bee/v2/pkg/file/pipeline/builder"
+	"github.com/ethersphere/bee/v2/pkg/manifest"
+	testingsoc "github.com/ethersphere/bee/v2/pkg/soc/testing"
+	storage "github.com/ethersphere/bee/v2/pkg/storage"
+	"github.com/ethersphere/bee/v2/pkg/storage/inmemchunkstore"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/traversal"
 )
 
 const (
@@ -147,7 +147,6 @@ func TestTraversalBytes(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		chunkCount := int(math.Ceil(float64(tc.dataSize) / swarm.ChunkSize))
 		t.Run(fmt.Sprintf("%d-chunk-%d-bytes", chunkCount, tc.dataSize), func(t *testing.T) {
 			t.Parallel()
@@ -155,19 +154,19 @@ func TestTraversalBytes(t *testing.T) {
 			var (
 				data       = generateSample(tc.dataSize)
 				iter       = newAddressIterator(tc.ignoreDuplicateHashes)
-				storerMock = mock.NewStorer()
+				storerMock = inmemchunkstore.New()
 			)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
-			pipe := builder.NewPipelineBuilder(ctx, storerMock, storage.ModePutUpload, false)
+			pipe := builder.NewPipelineBuilder(ctx, storerMock, false, 0)
 			address, err := builder.FeedPipeline(ctx, pipe, bytes.NewReader(data))
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			err = traversal.New(storerMock).Traverse(ctx, address, iter.Next)
+			err = traversal.New(storerMock, storerMock).Traverse(ctx, address, iter.Next)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -207,7 +206,7 @@ func TestTraversalFiles(t *testing.T) {
 			wantHashCount: 4,
 			wantHashes: []string{
 				"ae16fb27474b41273c0deb355e4405d3cd0a6639f834285f97c75636c9e29df7", // root manifest
-				"0cc878d32c96126d47f63fbe391114ee1438cd521146fc975dea1546d302b6c0", // mainifest root metadata
+				"0cc878d32c96126d47f63fbe391114ee1438cd521146fc975dea1546d302b6c0", // manifest root metadata
 				"05e34f11a0967e8c09968b69c4f486f569ef58a31a197992e01304a1e59f8e75", // manifest file entry
 				"e94a5aadf259f008b7d5039420c65d692901846523f503d97d24e2f077786d9a", // bytes
 			},
@@ -242,7 +241,6 @@ func TestTraversalFiles(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		chunkCount := int(math.Ceil(float64(tc.filesSize) / swarm.ChunkSize))
 		t.Run(fmt.Sprintf("%d-chunk-%d-bytes", chunkCount, tc.filesSize), func(t *testing.T) {
 			t.Parallel()
@@ -250,19 +248,19 @@ func TestTraversalFiles(t *testing.T) {
 			var (
 				data       = generateSample(tc.filesSize)
 				iter       = newAddressIterator(tc.ignoreDuplicateHashes)
-				storerMock = mock.NewStorer()
+				storerMock = inmemchunkstore.New()
 			)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
-			pipe := builder.NewPipelineBuilder(ctx, storerMock, storage.ModePutUpload, false)
+			pipe := builder.NewPipelineBuilder(ctx, storerMock, false, 0)
 			fr, err := builder.FeedPipeline(ctx, pipe, bytes.NewReader(data))
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			ls := loadsave.New(storerMock, pipelineFactory(storerMock, storage.ModePutRequest, false))
+			ls := loadsave.New(storerMock, storerMock, pipelineFactory(storerMock, false))
 			fManifest, err := manifest.NewDefaultManifest(ls, false)
 			if err != nil {
 				t.Fatal(err)
@@ -294,7 +292,7 @@ func TestTraversalFiles(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			err = traversal.New(storerMock).Traverse(ctx, address, iter.Next)
+			err = traversal.New(storerMock, storerMock).Traverse(ctx, address, iter.Next)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -403,12 +401,11 @@ func TestTraversalManifest(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(fmt.Sprintf("%s-%d-files-%d-chunks", defaultMediaType, len(tc.files), tc.wantHashCount), func(t *testing.T) {
 			t.Parallel()
 
 			var (
-				storerMock = mock.NewStorer()
+				storerMock = inmemchunkstore.New()
 				iter       = newAddressIterator(tc.ignoreDuplicateHashes)
 			)
 
@@ -421,7 +418,7 @@ func TestTraversalManifest(t *testing.T) {
 			}
 			wantHashes = append(wantHashes, tc.manifestHashes...)
 
-			ls := loadsave.New(storerMock, pipelineFactory(storerMock, storage.ModePutRequest, false))
+			ls := loadsave.New(storerMock, storerMock, pipelineFactory(storerMock, false))
 			dirManifest, err := manifest.NewMantarayManifest(ls, false)
 			if err != nil {
 				t.Fatal(err)
@@ -430,7 +427,7 @@ func TestTraversalManifest(t *testing.T) {
 			for _, f := range tc.files {
 				data := generateSample(f.size)
 
-				pipe := builder.NewPipelineBuilder(ctx, storerMock, storage.ModePutUpload, false)
+				pipe := builder.NewPipelineBuilder(ctx, storerMock, false, 0)
 				fr, err := builder.FeedPipeline(ctx, pipe, bytes.NewReader(data))
 				if err != nil {
 					t.Fatal(err)
@@ -452,7 +449,7 @@ func TestTraversalManifest(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			err = traversal.New(storerMock).Traverse(ctx, address, iter.Next)
+			err = traversal.New(storerMock, storerMock).Traverse(ctx, address, iter.Next)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -477,21 +474,20 @@ func TestTraversalManifest(t *testing.T) {
 func TestTraversalSOC(t *testing.T) {
 	t.Parallel()
 
-	store := mock.NewStorer()
+	store := inmemchunkstore.New()
 	iter := newAddressIterator(false)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	ctx := context.Background()
 
 	s := testingsoc.GenerateMockSOC(t, generateSample(swarm.ChunkSize))
 	sch := s.Chunk()
 
-	_, err := store.Put(ctx, storage.ModePutUploadPin, sch)
+	err := store.Put(ctx, sch)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = traversal.New(store).Traverse(ctx, sch.Address(), iter.Next)
+	err = traversal.New(store, store).Traverse(ctx, sch.Address(), iter.Next)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -505,8 +501,8 @@ func TestTraversalSOC(t *testing.T) {
 	}
 }
 
-func pipelineFactory(s storage.Putter, mode storage.ModePut, encrypt bool) func() pipeline.Interface {
+func pipelineFactory(s storage.Putter, encrypt bool) func() pipeline.Interface {
 	return func() pipeline.Interface {
-		return builder.NewPipelineBuilder(context.Background(), s, mode, encrypt)
+		return builder.NewPipelineBuilder(context.Background(), s, encrypt, 0)
 	}
 }

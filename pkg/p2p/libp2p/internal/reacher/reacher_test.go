@@ -10,19 +10,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethersphere/bee/pkg/p2p"
-	"github.com/ethersphere/bee/pkg/p2p/libp2p/internal/reacher"
-	"github.com/ethersphere/bee/pkg/swarm"
-	"github.com/ethersphere/bee/pkg/util/testutil"
+	"github.com/ethersphere/bee/v2/pkg/p2p"
+	"github.com/ethersphere/bee/v2/pkg/p2p/libp2p/internal/reacher"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/util/testutil"
 	ma "github.com/multiformats/go-multiaddr"
 	"go.uber.org/atomic"
 )
 
 var defaultOptions = reacher.Options{
 	PingTimeout:        time.Second * 5,
-	PingMaxAttempts:    3,
 	Workers:            8,
-	RetryAfterDuration: time.Millisecond,
+	RetryAfterDuration: time.Second,
 }
 
 func TestPingSuccess(t *testing.T) {
@@ -62,7 +61,6 @@ func TestPingSuccess(t *testing.T) {
 			},
 		},
 	} {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -121,8 +119,6 @@ func TestDisconnected(t *testing.T) {
 	r.Connected(swarm.RandAddress(t), nil)
 	r.Connected(disconnectedOverlay, disconnectedMa)
 	r.Disconnected(disconnectedOverlay)
-
-	time.Sleep(time.Millisecond * 50) // wait for reachable func to be called
 }
 
 type mock struct {

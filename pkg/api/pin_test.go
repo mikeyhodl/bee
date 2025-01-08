@@ -5,23 +5,21 @@
 package api_test
 
 import (
-	"bytes"
+	"context"
 	"net/http"
 	"strings"
 	"testing"
 
-	"github.com/ethersphere/bee/pkg/api"
-	"github.com/ethersphere/bee/pkg/jsonhttp"
-	"github.com/ethersphere/bee/pkg/jsonhttp/jsonhttptest"
-	"github.com/ethersphere/bee/pkg/log"
-	pinning "github.com/ethersphere/bee/pkg/pinning/mock"
-	mockpost "github.com/ethersphere/bee/pkg/postage/mock"
-	statestore "github.com/ethersphere/bee/pkg/statestore/mock"
-	"github.com/ethersphere/bee/pkg/storage/mock"
-	testingc "github.com/ethersphere/bee/pkg/storage/testing"
-	"github.com/ethersphere/bee/pkg/swarm"
-	"github.com/ethersphere/bee/pkg/tags"
-	"github.com/ethersphere/bee/pkg/traversal"
+	"github.com/ethersphere/bee/v2/pkg/api"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp/jsonhttptest"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	mockpost "github.com/ethersphere/bee/v2/pkg/postage/mock"
+	storage "github.com/ethersphere/bee/v2/pkg/storage"
+	"github.com/ethersphere/bee/v2/pkg/storage/inmemstore"
+	storer "github.com/ethersphere/bee/v2/pkg/storer"
+	mockstorer "github.com/ethersphere/bee/v2/pkg/storer/mock"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
 )
 
 func checkPinHandlers(t *testing.T, client *http.Client, rootHash string, createPin bool) {
@@ -82,15 +80,10 @@ func checkPinHandlers(t *testing.T, client *http.Client, rootHash string, create
 // nolint:paralleltest
 func TestPinHandlers(t *testing.T) {
 	var (
-		logger          = log.Noop
-		storerMock      = mock.NewStorer()
+		storerMock      = mockstorer.New()
 		client, _, _, _ = newTestServer(t, testServerOptions{
-			Storer:    storerMock,
-			Traversal: traversal.New(storerMock),
-			Tags:      tags.NewTags(statestore.NewStateStore(), logger),
-			Pinning:   pinning.NewServiceMock(),
-			Logger:    logger,
-			Post:      mockpost.New(mockpost.WithAcceptAll()),
+			Storer: storerMock,
+			Post:   mockpost.New(mockpost.WithAcceptAll()),
 		})
 	)
 
@@ -107,6 +100,10 @@ func TestPinHandlers(t *testing.T) {
 		checkPinHandlers(t, client, rootHash, true)
 	})
 
+	t.Run("bytes missing", func(t *testing.T) {
+		jsonhttptest.Request(t, client, http.MethodPost, "/pins/"+swarm.RandAddress(t).String(), http.StatusNotFound)
+	})
+
 	t.Run("bzz", func(t *testing.T) {
 		tarReader := tarFiles(t, []f{{
 			data: []byte("<h1>Swarm"),
@@ -118,7 +115,7 @@ func TestPinHandlers(t *testing.T) {
 			jsonhttptest.WithRequestHeader(api.SwarmDeferredUploadHeader, "true"),
 			jsonhttptest.WithRequestHeader(api.SwarmPostageBatchIdHeader, batchOkStr),
 			jsonhttptest.WithRequestBody(tarReader),
-			jsonhttptest.WithRequestHeader("Content-Type", api.ContentTypeTar),
+			jsonhttptest.WithRequestHeader(api.ContentTypeHeader, api.ContentTypeTar),
 			jsonhttptest.WithRequestHeader(api.SwarmCollectionHeader, "true"),
 			jsonhttptest.WithRequestHeader(api.SwarmPinHeader, "true"),
 			jsonhttptest.WithExpectedJSONResponse(api.BzzUploadResponse{
@@ -130,34 +127,18 @@ func TestPinHandlers(t *testing.T) {
 		header := jsonhttptest.Request(t, client, http.MethodPost, "/bzz?name=somefile.txt", http.StatusCreated,
 			jsonhttptest.WithRequestHeader(api.SwarmDeferredUploadHeader, "true"),
 			jsonhttptest.WithRequestHeader(api.SwarmPostageBatchIdHeader, batchOkStr),
-			jsonhttptest.WithRequestHeader("Content-Type", "text/plain"),
+			jsonhttptest.WithRequestHeader(api.ContentTypeHeader, "text/plain"),
 			jsonhttptest.WithRequestHeader(api.SwarmEncryptHeader, "true"),
 			jsonhttptest.WithRequestHeader(api.SwarmPinHeader, "true"),
 			jsonhttptest.WithRequestBody(strings.NewReader("this is a simple text")),
 		)
 
-		rootHash = strings.Trim(header.Get("ETag"), "\"")
+		rootHash = strings.Trim(header.Get(api.ETagHeader), "\"")
 		checkPinHandlers(t, client, rootHash, false)
-	})
-
-	t.Run("chunk", func(t *testing.T) {
-		var (
-			chunk    = testingc.GenerateTestRandomChunk()
-			rootHash = chunk.Address().String()
-		)
-		jsonhttptest.Request(t, client, http.MethodPost, "/chunks", http.StatusCreated,
-			jsonhttptest.WithRequestHeader(api.SwarmDeferredUploadHeader, "true"),
-			jsonhttptest.WithRequestHeader(api.SwarmPostageBatchIdHeader, batchOkStr),
-			jsonhttptest.WithRequestBody(bytes.NewReader(chunk.Data())),
-			jsonhttptest.WithExpectedJSONResponse(api.ChunkAddressResponse{
-				Reference: chunk.Address(),
-			}),
-		)
-		checkPinHandlers(t, client, rootHash, true)
 	})
 }
 
-func Test_pinHandlers_invalidInputs(t *testing.T) {
+func TestPinHandlersInvalidInputs(t *testing.T) {
 	t.Parallel()
 
 	client, _, _, _ := newTestServer(t, testServerOptions{})
@@ -195,9 +176,7 @@ func Test_pinHandlers_invalidInputs(t *testing.T) {
 	}}
 
 	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodDelete} {
-		method := method
 		for _, tc := range tests {
-			tc := tc
 			t.Run(method+" "+tc.name, func(t *testing.T) {
 				t.Parallel()
 
@@ -207,4 +186,52 @@ func Test_pinHandlers_invalidInputs(t *testing.T) {
 			})
 		}
 	}
+}
+
+const pinRef = "620fcd78c7ce54da2d1b7cc2274a02e190cbe8fecbc3bd244690ab6517ce8f39"
+
+func TestIntegrityHandler(t *testing.T) {
+	t.Parallel()
+
+	t.Run("ok", func(t *testing.T) {
+		t.Parallel()
+		testServer, _, _, _ := newTestServer(t, testServerOptions{
+			PinIntegrity: &mockPinIntegrity{
+				Store:  inmemstore.New(),
+				tester: t,
+			},
+		})
+
+		endp := "/pins/check?ref=" + pinRef
+
+		// When probe is not set health endpoint should indicate that node is not healthy
+		jsonhttptest.Request(t, testServer, http.MethodGet, endp, http.StatusOK, jsonhttptest.WithExpectedResponse(nil))
+	})
+
+	t.Run("wrong hash format", func(t *testing.T) {
+		t.Parallel()
+		testServer, _, _, _ := newTestServer(t, testServerOptions{
+			PinIntegrity: &mockPinIntegrity{
+				Store:  inmemstore.New(),
+				tester: t,
+			},
+		})
+
+		endp := "/pins/check?ref=0xbadhash"
+
+		// When probe is not set health endpoint should indicate that node is not healthy
+		jsonhttptest.Request(t, testServer, http.MethodGet, endp, http.StatusBadRequest, jsonhttptest.WithExpectedResponse(nil))
+	})
+}
+
+type mockPinIntegrity struct {
+	tester *testing.T
+	Store  storage.Store
+}
+
+func (p *mockPinIntegrity) Check(ctx context.Context, logger log.Logger, pin string, out chan storer.PinStat) {
+	if pin != pinRef {
+		p.tester.Fatal("bad pin", pin)
+	}
+	close(out)
 }

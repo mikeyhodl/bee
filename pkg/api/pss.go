@@ -14,11 +14,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ethersphere/bee/pkg/crypto"
-	"github.com/ethersphere/bee/pkg/jsonhttp"
-	"github.com/ethersphere/bee/pkg/postage"
-	"github.com/ethersphere/bee/pkg/pss"
-	"github.com/ethersphere/bee/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/crypto"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
+	"github.com/ethersphere/bee/v2/pkg/postage"
+	"github.com/ethersphere/bee/v2/pkg/pss"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 )
@@ -64,6 +64,14 @@ func (s *Service) pssPostHandler(w http.ResponseWriter, r *http.Request) {
 		queries.Recipient = &(crypto.Secp256k1PrivateKeyFromBytes(topic[:])).PublicKey
 	}
 
+	headers := struct {
+		BatchID []byte `map:"Swarm-Postage-Batch-Id" validate:"required"`
+	}{}
+	if response := s.mapStructure(r.Header, &headers); response != nil {
+		response("invalid header params", logger, w)
+		return
+	}
+
 	payload, err := io.ReadAll(r.Body)
 	if err != nil {
 		logger.Debug("read body failed", "error", err)
@@ -71,16 +79,9 @@ func (s *Service) pssPostHandler(w http.ResponseWriter, r *http.Request) {
 		jsonhttp.InternalServerError(w, "pss send failed")
 		return
 	}
-	batch, err := requestPostageBatchId(r)
+	i, save, err := s.post.GetStampIssuer(headers.BatchID)
 	if err != nil {
-		logger.Debug("decode postage batch id failed", "error", err)
-		logger.Error(nil, "decode postage batch id failed")
-		jsonhttp.BadRequest(w, "invalid postage batch id")
-		return
-	}
-	i, save, err := s.post.GetStampIssuer(batch)
-	if err != nil {
-		logger.Debug("get postage batch issuer failed", "batch_id", hex.EncodeToString(batch), "error", err)
+		logger.Debug("get postage batch issuer failed", "batch_id", hex.EncodeToString(headers.BatchID), "error", err)
 		logger.Error(nil, "get postage batch issuer failed")
 		switch {
 		case errors.Is(err, postage.ErrNotFound):
@@ -92,13 +93,8 @@ func (s *Service) pssPostHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	defer func() {
-		if err := save(); err != nil {
-			s.logger.Debug("stamp issuer save", "error", err)
-		}
-	}()
 
-	stamper := postage.NewStamper(i, s.signer)
+	stamper := postage.NewStamper(s.stamperStore, i, s.signer)
 
 	err = s.pss.Send(r.Context(), topic, payload, stamper, queries.Recipient, targets)
 	if err != nil {
@@ -110,6 +106,13 @@ func (s *Service) pssPostHandler(w http.ResponseWriter, r *http.Request) {
 		default:
 			jsonhttp.InternalServerError(w, "pss send failed")
 		}
+		return
+	}
+
+	if err = save(); err != nil {
+		logger.Debug("save stamp failed", "error", err)
+		logger.Error(nil, "save stamp failed")
+		jsonhttp.InternalServerError(w, "pss send failed")
 		return
 	}
 

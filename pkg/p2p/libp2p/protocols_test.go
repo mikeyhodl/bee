@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethersphere/bee/pkg/p2p"
-	"github.com/ethersphere/bee/pkg/p2p/libp2p"
-	"github.com/ethersphere/bee/pkg/spinlock"
+	"github.com/ethersphere/bee/v2/pkg/p2p"
+	"github.com/ethersphere/bee/v2/pkg/p2p/libp2p"
+	"github.com/ethersphere/bee/v2/pkg/spinlock"
 	libp2pm "github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
 	protocol "github.com/libp2p/go-libp2p/core/protocol"
@@ -180,7 +180,7 @@ func TestNewStreamMulti(t *testing.T) {
 		t.Fatal(err)
 	}
 	if atomic.LoadInt32(&h1calls) != 1 {
-		t.Fatal("handler should have been called but wasnt")
+		t.Fatal("handler should have been called but wasn't")
 	}
 	if atomic.LoadInt32(&h2calls) > 0 {
 		t.Fatal("handler should not have been called")
@@ -408,7 +408,7 @@ func TestPing(t *testing.T) {
 
 	s1, _ := newService(t, 1, libp2pServiceOpts{
 		libp2pOpts: libp2p.WithHostFactory(
-			func(_ ...libp2pm.Option) (host.Host, error) {
+			func(...libp2pm.Option) (host.Host, error) {
 				return bhost.NewHost(swarmt.GenSwarm(t), &bhost.HostOpts{EnablePing: true})
 			},
 		),
@@ -416,8 +416,13 @@ func TestPing(t *testing.T) {
 
 	s2, _ := newService(t, 1, libp2pServiceOpts{
 		libp2pOpts: libp2p.WithHostFactory(
-			func(_ ...libp2pm.Option) (host.Host, error) {
-				return bhost.NewHost(swarmt.GenSwarm(t), &bhost.HostOpts{EnablePing: true})
+			func(...libp2pm.Option) (host.Host, error) {
+				host, err := bhost.NewHost(swarmt.GenSwarm(t), &bhost.HostOpts{EnablePing: true})
+				if err != nil {
+					t.Fatalf("start host: %v", err)
+				}
+				host.Start()
+				return host, nil
 			},
 		),
 	})

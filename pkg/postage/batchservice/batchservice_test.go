@@ -13,14 +13,14 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethersphere/bee/pkg/log"
-	"github.com/ethersphere/bee/pkg/postage"
-	"github.com/ethersphere/bee/pkg/postage/batchservice"
-	"github.com/ethersphere/bee/pkg/postage/batchstore/mock"
-	postagetesting "github.com/ethersphere/bee/pkg/postage/testing"
-	mocks "github.com/ethersphere/bee/pkg/statestore/mock"
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/ethersphere/bee/pkg/util/testutil"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/postage"
+	"github.com/ethersphere/bee/v2/pkg/postage/batchservice"
+	"github.com/ethersphere/bee/v2/pkg/postage/batchstore/mock"
+	postagetesting "github.com/ethersphere/bee/v2/pkg/postage/testing"
+	mocks "github.com/ethersphere/bee/v2/pkg/statestore/mock"
+	"github.com/ethersphere/bee/v2/pkg/storage"
+	"github.com/ethersphere/bee/v2/pkg/util/testutil"
 )
 
 var (
@@ -49,7 +49,7 @@ type mockBatchListener struct {
 	diluteCount int
 }
 
-func (m *mockBatchListener) HandleCreate(b *postage.Batch, topUpAmount *big.Int) error {
+func (m *mockBatchListener) HandleCreate(b *postage.Batch, _ *big.Int) error {
 	m.createCount++
 	return nil
 }
@@ -62,7 +62,11 @@ func (m *mockBatchListener) HandleDepthIncrease(_ []byte, _ uint8) {
 	m.diluteCount++
 }
 
+var _ postage.BatchEventListener = (*mockBatchListener)(nil)
+
 func TestBatchServiceCreate(t *testing.T) {
+	t.Parallel()
+
 	testChainState := postagetesting.NewChainState()
 
 	validateNoBatch := func(t *testing.T, testBatch *postage.Batch, st *mock.BatchStore) {
@@ -238,6 +242,8 @@ func TestBatchServiceCreate(t *testing.T) {
 }
 
 func TestBatchServiceTopUp(t *testing.T) {
+	t.Parallel()
+
 	testBatch := postagetesting.MustNewBatch()
 	testNormalisedBalance := big.NewInt(2000000000000)
 	testTopUpAmount := big.NewInt(1000)
@@ -339,6 +345,8 @@ func TestBatchServiceTopUp(t *testing.T) {
 }
 
 func TestBatchServiceUpdateDepth(t *testing.T) {
+	t.Parallel()
+
 	const testNewDepth = 30
 	testNormalisedBalance := big.NewInt(2000000000000)
 	testBatch := postagetesting.MustNewBatch()
@@ -441,6 +449,8 @@ func TestBatchServiceUpdateDepth(t *testing.T) {
 }
 
 func TestBatchServiceUpdatePrice(t *testing.T) {
+	t.Parallel()
+
 	testChainState := postagetesting.NewChainState()
 	testChainState.CurrentPrice = big.NewInt(100000)
 	testNewPrice := big.NewInt(20000000)
@@ -475,6 +485,8 @@ func TestBatchServiceUpdatePrice(t *testing.T) {
 	})
 }
 func TestBatchServiceUpdateBlockNumber(t *testing.T) {
+	t.Parallel()
+
 	testChainState := &postage.ChainState{
 		Block:        1,
 		CurrentPrice: big.NewInt(100),
@@ -499,6 +511,8 @@ func TestBatchServiceUpdateBlockNumber(t *testing.T) {
 }
 
 func TestTransactionOk(t *testing.T) {
+	t.Parallel()
+
 	svc, store, s := newTestStoreAndService(t)
 	if err := svc.Start(context.Background(), 10, nil); err != nil {
 		t.Fatal(err)
@@ -526,6 +540,8 @@ func TestTransactionOk(t *testing.T) {
 }
 
 func TestTransactionError(t *testing.T) {
+	t.Parallel()
+
 	svc, store, s := newTestStoreAndService(t)
 	if err := svc.Start(context.Background(), 10, nil); err != nil {
 		t.Fatal(err)
@@ -549,6 +565,8 @@ func TestTransactionError(t *testing.T) {
 }
 
 func TestChecksum(t *testing.T) {
+	t.Parallel()
+
 	s := mocks.NewStateStore()
 	store := mock.New()
 	mockHash := &hs{}
@@ -570,6 +588,8 @@ func TestChecksum(t *testing.T) {
 }
 
 func TestChecksumResync(t *testing.T) {
+	t.Parallel()
+
 	s := mocks.NewStateStore()
 	store := mock.New()
 	mockHash := &hs{}

@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethersphere/bee/pkg/p2p"
-	"github.com/ethersphere/bee/pkg/p2p/streamtest"
-	"github.com/ethersphere/bee/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/p2p"
+	"github.com/ethersphere/bee/v2/pkg/p2p/streamtest"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
 	ma "github.com/multiformats/go-multiaddr"
 )
 
@@ -172,6 +172,8 @@ func TestRecorder_fullcloseWithRemoteClose(t *testing.T) {
 }
 
 func TestRecorder_fullcloseWithoutRemoteClose(t *testing.T) {
+	t.Parallel()
+
 	recorder := streamtest.New(
 		streamtest.WithProtocols(
 			newTestProtocol(func(_ context.Context, peer p2p.Peer, stream p2p.Stream) error {

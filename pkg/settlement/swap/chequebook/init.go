@@ -13,12 +13,12 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	chaincfg "github.com/ethersphere/bee/pkg/config"
-	"github.com/ethersphere/bee/pkg/log"
-	"github.com/ethersphere/bee/pkg/sctx"
-	"github.com/ethersphere/bee/pkg/settlement/swap/erc20"
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/ethersphere/bee/pkg/transaction"
+	chaincfg "github.com/ethersphere/bee/v2/pkg/config"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/sctx"
+	"github.com/ethersphere/bee/v2/pkg/settlement/swap/erc20"
+	"github.com/ethersphere/bee/v2/pkg/storage"
+	"github.com/ethersphere/bee/v2/pkg/transaction"
 )
 
 const (
@@ -90,13 +90,13 @@ func checkBalance(
 
 			if insufficientETH && insufficientERC20 {
 				msg := fmt.Sprintf("cannot continue until there is at least min %s (for Gas) and at least min %s available on address", nativeTokenName, swarmTokenName)
-				logger.Warning(msg, "min_xdai_amount", neededETH, "min_bzz_amount", neededERC20, "address", overlayEthAddress)
+				logger.Warning(msg, "min_amount", neededETH, "min_bzz_amount", neededERC20, "address", overlayEthAddress)
 			} else if insufficientETH {
 				msg := fmt.Sprintf("cannot continue until there is at least min %s (for Gas) available on address", nativeTokenName)
-				logger.Warning(msg, "min_xdai_amount", neededETH, "address", overlayEthAddress)
+				logger.Warning(msg, "min_amount", neededETH, "address", overlayEthAddress)
 			} else {
 				msg := fmt.Sprintf("cannot continue until there is at least min %s available on address", swarmTokenName)
-				logger.Warning(msg, "min_bzz_amount", neededERC20, "address", overlayEthAddress)
+				logger.Warning(msg, "min_amount", neededERC20, "address", overlayEthAddress)
 			}
 			if chainId == chaincfg.Testnet.ChainID {
 				logger.Warning("learn how to fund your node by visiting our docs at https://docs.ethswarm.org/docs/installation/fund-your-node")
@@ -132,12 +132,6 @@ func Init(
 	erc20Service erc20.Service,
 ) (chequebookService Service, err error) {
 	logger = logger.WithName(loggerName).Register()
-
-	// verify that the supplied factory is valid
-	err = chequebookFactory.VerifyBytecode(ctx)
-	if err != nil {
-		return nil, err
-	}
 
 	var chequebookAddress common.Address
 	err = stateStore.Get(chequebookKey, &chequebookAddress)

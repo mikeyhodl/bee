@@ -17,10 +17,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ethersphere/bee/pkg/log"
-	"github.com/ethersphere/bee/pkg/postage"
-	"github.com/ethersphere/bee/pkg/pushsync"
-	"github.com/ethersphere/bee/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/postage"
+	"github.com/ethersphere/bee/v2/pkg/pushsync"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/topology"
 )
 
 // loggerName is the tree path name of the logger for this package.
@@ -98,7 +99,7 @@ func (p *pss) Send(ctx context.Context, topic Topic, payload []byte, stamper pos
 		return err
 	}
 
-	stamp, err := stamper.Stamp(tc.Address())
+	stamp, err := stamper.Stamp(tc.Address(), tc.Address())
 	if err != nil {
 		return err
 	}
@@ -108,6 +109,9 @@ func (p *pss) Send(ctx context.Context, topic Topic, payload []byte, stamper pos
 
 	// push the chunk using push sync so that it reaches it destination in network
 	if _, err = p.pusher.PushChunkToClosest(ctx, tc); err != nil {
+		if errors.Is(err, topology.ErrWantSelf) {
+			return nil
+		}
 		return err
 	}
 

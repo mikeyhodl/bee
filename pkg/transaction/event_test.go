@@ -11,13 +11,13 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethersphere/bee/pkg/transaction"
-	"github.com/ethersphere/bee/pkg/util/abiutil"
+	"github.com/ethersphere/bee/v2/pkg/transaction"
+	"github.com/ethersphere/bee/v2/pkg/util/abiutil"
 	"github.com/ethersphere/go-sw3-abi/sw3abi"
 )
 
 var (
-	erc20ABI = abiutil.MustParseABI(sw3abi.ERC20ABIv0_3_1)
+	erc20ABI = abiutil.MustParseABI(sw3abi.ERC20ABIv0_6_5)
 )
 
 type transferEvent struct {
@@ -30,8 +30,8 @@ func newTransferLog(address, from, to common.Address, value *big.Int) *types.Log
 	return &types.Log{
 		Topics: []common.Hash{
 			erc20ABI.Events["Transfer"].ID,
-			from.Hash(),
-			to.Hash(),
+			common.BytesToHash(from.Bytes()),
+			common.BytesToHash(to.Bytes()),
 		},
 		Data:    value.FillBytes(make([]byte, 32)),
 		Address: address,

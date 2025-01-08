@@ -10,9 +10,9 @@ import (
 	"bytes"
 	"errors"
 
-	"github.com/ethersphere/bee/pkg/cac"
-	"github.com/ethersphere/bee/pkg/crypto"
-	"github.com/ethersphere/bee/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/cac"
+	"github.com/ethersphere/bee/v2/pkg/crypto"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
 )
 
 var (
@@ -51,8 +51,8 @@ func NewSigned(id ID, ch swarm.Chunk, owner, sig []byte) (*SOC, error) {
 	return s, nil
 }
 
-// address returns the SOC chunk address.
-func (s *SOC) address() (swarm.Address, error) {
+// Address returns the SOC chunk address.
+func (s *SOC) Address() (swarm.Address, error) {
 	if len(s.owner) != crypto.AddressSize {
 		return swarm.ZeroAddress, errInvalidAddress
 	}
@@ -66,11 +66,26 @@ func (s *SOC) WrappedChunk() swarm.Chunk {
 
 // Chunk returns the SOC chunk.
 func (s *SOC) Chunk() (swarm.Chunk, error) {
-	socAddress, err := s.address()
+	socAddress, err := s.Address()
 	if err != nil {
 		return nil, err
 	}
 	return swarm.NewChunk(socAddress, s.toBytes()), nil
+}
+
+// Signature returns the SOC signature.
+func (s *SOC) Signature() []byte {
+	return s.signature
+}
+
+// OwnerAddress returns the ethereum address of the SOC owner.
+func (s *SOC) OwnerAddress() []byte {
+	return s.owner
+}
+
+// ID returns the SOC id.
+func (s *SOC) ID() []byte {
+	return s.id
 }
 
 // toBytes is a helper function to convert the SOC data to bytes.
@@ -113,6 +128,22 @@ func (s *SOC) Sign(signer crypto.Signer) (swarm.Chunk, error) {
 	s.signature = signature
 
 	return s.Chunk()
+}
+
+// UnwrapCAC extracts the CAC inside the SOC.
+func UnwrapCAC(sch swarm.Chunk) (swarm.Chunk, error) {
+	chunkData := sch.Data()
+	if len(chunkData) < swarm.SocMinChunkSize {
+		return nil, errWrongChunkSize
+	}
+
+	cursor := swarm.HashSize + swarm.SocSignatureSize
+	ch, err := cac.NewWithDataSpan(chunkData[cursor:])
+	if err != nil {
+		return nil, err
+	}
+
+	return ch, nil
 }
 
 // FromChunk recreates a SOC representation from swarm.Chunk data.

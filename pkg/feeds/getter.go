@@ -6,19 +6,20 @@ package feeds
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"time"
 
-	"github.com/ethersphere/bee/pkg/soc"
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/ethersphere/bee/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/soc"
+	storage "github.com/ethersphere/bee/v2/pkg/storage"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
 )
+
+var errNotLegacyPayload = errors.New("feed update is not in the legacy payload structure")
 
 // Lookup is the interface for time based feed lookup
 type Lookup interface {
-	At(ctx context.Context, at, after int64) (chunk swarm.Chunk, currentIndex, nextIndex Index, err error)
+	At(ctx context.Context, at int64, after uint64) (chunk swarm.Chunk, currentIndex, nextIndex Index, err error)
 }
 
 // Getter encapsulates a chunk Getter getter and a feed and provides non-concurrent lookup methods
@@ -34,7 +35,7 @@ func NewGetter(getter storage.Getter, feed *Feed) *Getter {
 
 // Latest looks up the latest update of the feed
 // after is a unix time hint of the latest known update
-func Latest(ctx context.Context, l Lookup, after int64) (swarm.Chunk, error) {
+func Latest(ctx context.Context, l Lookup, after uint64) (swarm.Chunk, error) {
 	c, _, _, err := l.At(ctx, time.Now().Unix(), after)
 	return c, err
 }
@@ -46,34 +47,48 @@ func (f *Getter) Get(ctx context.Context, i Index) (swarm.Chunk, error) {
 	if err != nil {
 		return nil, err
 	}
-	return f.getter.Get(ctx, storage.ModeGetRequest, addr)
+	return f.getter.Get(ctx, addr)
 }
 
-// FromChunk parses out the timestamp and the payload
-func FromChunk(ch swarm.Chunk) (uint64, []byte, error) {
+func GetWrappedChunk(ctx context.Context, getter storage.Getter, ch swarm.Chunk) (swarm.Chunk, error) {
+	wc, err := FromChunk(ch)
+	if err != nil {
+		return nil, err
+	}
+	// try to split the timestamp and reference
+	// possible values right now:
+	// unencrypted ref: span+timestamp+ref => 8+8+32=48
+	// encrypted ref: span+timestamp+ref+decryptKey => 8+8+64=80
+	ref, err := legacyPayload(wc)
+	if err != nil {
+		if errors.Is(err, errNotLegacyPayload) {
+			return wc, nil
+		}
+		return nil, err
+	}
+	wc, err = getter.Get(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+
+	return wc, nil
+}
+
+// FromChunk parses out the wrapped chunk
+func FromChunk(ch swarm.Chunk) (swarm.Chunk, error) {
 	s, err := soc.FromChunk(ch)
 	if err != nil {
-		return 0, nil, err
+		return nil, fmt.Errorf("soc unmarshal: %w", err)
 	}
-	cac := s.WrappedChunk()
-	if len(cac.Data()) < 16 {
-		return 0, nil, errors.New("feed update payload too short")
-	}
-	payload := cac.Data()[16:]
-	at := binary.BigEndian.Uint64(cac.Data()[8:16])
-	return at, payload, nil
+	return s.WrappedChunk(), nil
 }
 
-// UpdatedAt extracts the time of feed other than update
-func UpdatedAt(ch swarm.Chunk) (uint64, error) {
-	d := ch.Data()
-	if len(d) < 113 {
-		return 0, fmt.Errorf("too short: %d", len(d))
+// legacyPayload returns back the referenced chunk and datetime from the legacy feed payload
+func legacyPayload(wrappedChunk swarm.Chunk) (swarm.Address, error) {
+	cacData := wrappedChunk.Data()
+	if !(len(cacData) == 16+swarm.HashSize || len(cacData) == 16+swarm.HashSize*2) {
+		return swarm.ZeroAddress, errNotLegacyPayload
 	}
-	// a soc chunk with time information in the wrapped content addressed chunk
-	// 0-32    index,
-	// 65-97   signature,
-	// 98-105  span of wrapped chunk
-	// 105-113 timestamp
-	return binary.BigEndian.Uint64(d[105:113]), nil
+
+	return swarm.NewAddress(cacData[16:]), nil
 }

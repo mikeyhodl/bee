@@ -14,19 +14,19 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ethersphere/bee/pkg/settlement/swap/erc20"
-	"github.com/ethersphere/bee/pkg/storageincentives/staking"
-	"github.com/ethersphere/bee/pkg/transaction"
-
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethersphere/bee/pkg/crypto"
-	"github.com/ethersphere/bee/pkg/log"
-	"github.com/ethersphere/bee/pkg/postage"
-	"github.com/ethersphere/bee/pkg/postage/postagecontract"
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/ethersphere/bee/pkg/storageincentives/redistribution"
-	"github.com/ethersphere/bee/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/crypto"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/postage"
+	"github.com/ethersphere/bee/v2/pkg/postage/postagecontract"
+	"github.com/ethersphere/bee/v2/pkg/settlement/swap/erc20"
+	"github.com/ethersphere/bee/v2/pkg/storage"
+	"github.com/ethersphere/bee/v2/pkg/storageincentives/redistribution"
+	"github.com/ethersphere/bee/v2/pkg/storageincentives/staking"
+	"github.com/ethersphere/bee/v2/pkg/storer"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/transaction"
 )
 
 const loggerName = "storageincentives"
@@ -36,7 +36,7 @@ const (
 	DefaultBlocksPerPhase = DefaultBlocksPerRound / 4
 
 	// min # of transactions our wallet should be able to cover
-	minTxCountToCover = 25
+	minTxCountToCover = 15
 
 	// average tx gas used by transactions issued from agent
 	avgTxGas = 250_000
@@ -49,13 +49,8 @@ type ChainBackend interface {
 	SuggestGasPrice(ctx context.Context) (*big.Int, error)
 }
 
-type Monitor interface {
-	IsFullySynced() bool
-}
-
-type SampleData struct {
-	ReserveSample storage.Sample
-	StorageRadius uint8
+type Health interface {
+	IsHealthy() bool
 }
 
 type Agent struct {
@@ -63,19 +58,38 @@ type Agent struct {
 	metrics                metrics
 	backend                ChainBackend
 	blocksPerRound         uint64
-	monitor                Monitor
 	contract               redistribution.Contract
 	batchExpirer           postagecontract.PostageBatchExpirer
 	redistributionStatuser staking.RedistributionStatuser
-	radius                 postage.Radius
-	sampler                storage.Sampler
+	store                  storer.Reserve
+	fullSyncedFunc         func() bool
 	overlay                swarm.Address
 	quit                   chan struct{}
 	wg                     sync.WaitGroup
 	state                  *RedistributionState
+	chainStateGetter       postage.ChainStateGetter
+	commitLock             sync.Mutex
+	health                 Health
 }
 
-func New(overlay swarm.Address, ethAddress common.Address, backend ChainBackend, logger log.Logger, monitor Monitor, contract redistribution.Contract, batchExpirer postagecontract.PostageBatchExpirer, redistributionStatuser staking.RedistributionStatuser, radius postage.Radius, sampler storage.Sampler, blockTime time.Duration, blocksPerRound, blocksPerPhase uint64, stateStore storage.StateStorer, erc20Service erc20.Service, tranService transaction.Service) (*Agent, error) {
+func New(overlay swarm.Address,
+	ethAddress common.Address,
+	backend ChainBackend,
+	contract redistribution.Contract,
+	batchExpirer postagecontract.PostageBatchExpirer,
+	redistributionStatuser staking.RedistributionStatuser,
+	store storer.Reserve,
+	fullSyncedFunc func() bool,
+	blockTime time.Duration,
+	blocksPerRound,
+	blocksPerPhase uint64,
+	stateStore storage.StateStorer,
+	chainStateGetter postage.ChainStateGetter,
+	erc20Service erc20.Service,
+	tranService transaction.Service,
+	health Health,
+	logger log.Logger,
+) (*Agent, error) {
 	a := &Agent{
 		overlay:                overlay,
 		metrics:                newMetrics(),
@@ -83,12 +97,13 @@ func New(overlay swarm.Address, ethAddress common.Address, backend ChainBackend,
 		logger:                 logger.WithName(loggerName).Register(),
 		contract:               contract,
 		batchExpirer:           batchExpirer,
-		radius:                 radius,
-		monitor:                monitor,
+		store:                  store,
+		fullSyncedFunc:         fullSyncedFunc,
 		blocksPerRound:         blocksPerRound,
-		sampler:                sampler,
 		quit:                   make(chan struct{}),
 		redistributionStatuser: redistributionStatuser,
+		health:                 health,
+		chainStateGetter:       chainStateGetter,
 	}
 
 	state, err := NewRedistributionState(logger, ethAddress, stateStore, erc20Service, tranService)
@@ -111,37 +126,29 @@ func New(overlay swarm.Address, ethAddress common.Address, backend ChainBackend,
 // the sample is submitted, and in the reveal phase, the obfuscation key from the commit phase is submitted.
 // Next, in the claim phase, we check if we've won, and the cycle repeats. The cycle must occur in the length of one round.
 func (a *Agent) start(blockTime time.Duration, blocksPerRound, blocksPerPhase uint64) {
-
 	defer a.wg.Done()
 
 	phaseEvents := newEvents()
 	defer phaseEvents.Close()
 
-	logPhaseResult := func(phase PhaseType, round uint64, err error, isPhasePlayed bool) {
+	logErr := func(phase PhaseType, round uint64, err error) {
 		if err != nil {
 			a.logger.Error(err, "phase failed", "phase", phase, "round", round)
-		} else if isPhasePlayed {
-			a.logger.Info("phase played", "phase", phase, "round", round)
-		} else {
-			a.logger.Info("phase skipped", "phase", phase, "round", round)
 		}
 	}
 
-	// when we enter the commit phase, if the sample is already finished, run commit
 	phaseEvents.On(commit, func(ctx context.Context) {
 		phaseEvents.Cancel(claim)
 
 		round, _ := a.state.currentRoundAndPhase()
-		isPhasePlayed, err := a.handleCommit(ctx, round)
-		logPhaseResult(commit, round, err, isPhasePlayed)
+		err := a.handleCommit(ctx, round)
+		logErr(commit, round, err)
 	})
 
 	phaseEvents.On(reveal, func(ctx context.Context) {
 		phaseEvents.Cancel(commit, sample)
-
 		round, _ := a.state.currentRoundAndPhase()
-		isPhasePlayed, err := a.handleReveal(ctx, round)
-		logPhaseResult(reveal, round, err, isPhasePlayed)
+		logErr(reveal, round, a.handleReveal(ctx, round))
 	})
 
 	phaseEvents.On(claim, func(ctx context.Context) {
@@ -149,14 +156,13 @@ func (a *Agent) start(blockTime time.Duration, blocksPerRound, blocksPerPhase ui
 		phaseEvents.Publish(sample)
 
 		round, _ := a.state.currentRoundAndPhase()
-		isPhasePlayed, err := a.handleClaim(ctx, round)
-		logPhaseResult(claim, round, err, isPhasePlayed)
+		logErr(claim, round, a.handleClaim(ctx, round))
 	})
 
 	phaseEvents.On(sample, func(ctx context.Context) {
 		round, _ := a.state.currentRoundAndPhase()
 		isPhasePlayed, err := a.handleSample(ctx, round)
-		logPhaseResult(sample, round, err, isPhasePlayed)
+		logErr(sample, round, err)
 
 		// Sample handled could potentially take long time, therefore it could overlap with commit
 		// phase of next round. When that case happens commit event needs to be triggered once more
@@ -186,6 +192,8 @@ func (a *Agent) start(blockTime time.Duration, blocksPerRound, blocksPerPhase ui
 			return
 		}
 
+		a.state.SetCurrentBlock(block)
+
 		round := block / blocksPerRound
 
 		a.metrics.Round.Set(float64(round))
@@ -209,10 +217,13 @@ func (a *Agent) start(blockTime time.Duration, blocksPerRound, blocksPerPhase ui
 
 		a.logger.Info("entered new phase", "phase", currentPhase.String(), "round", round, "block", block)
 
-		a.state.SetCurrentEvent(currentPhase, round, block)
-		a.state.IsFullySynced(a.monitor.IsFullySynced())
+		a.state.SetCurrentEvent(currentPhase, round)
+		a.state.SetFullySynced(a.fullSyncedFunc())
+		a.state.SetHealthy(a.health.IsHealthy())
+		go a.state.purgeStaleRoundData()
 
-		isFrozen, err := a.redistributionStatuser.IsOverlayFrozen(ctx, block)
+		// check if node is frozen starting from the next block
+		isFrozen, err := a.redistributionStatuser.IsOverlayFrozen(ctx, block+1)
 		if err != nil {
 			a.logger.Error(err, "error checking if stake is frozen")
 		} else {
@@ -247,157 +258,194 @@ func (a *Agent) start(blockTime time.Duration, blocksPerRound, blocksPerPhase ui
 	}
 }
 
-func (a *Agent) handleCommit(ctx context.Context, round uint64) (bool, error) {
+func (a *Agent) handleCommit(ctx context.Context, round uint64) error {
+	// commit event handler has to be guarded with lock to avoid
+	// race conditions when handler is triggered again from sample phase
+	a.commitLock.Lock()
+	defer a.commitLock.Unlock()
+
+	if _, exists := a.state.CommitKey(round); exists {
+		// already committed on this round, phase is skipped
+		return nil
+	}
+
 	// the sample has to come from previous round to be able to commit it
 	sample, exists := a.state.SampleData(round - 1)
 	if !exists {
 		// In absence of sample, phase is skipped
-		return false, nil
+		return nil
 	}
 
 	err := a.commit(ctx, sample, round)
 	if err != nil {
-		a.logger.Error(err, "commit")
-		return false, err
+		return err
 	}
 
-	return true, nil
+	a.state.SetLastPlayedRound(round)
+
+	return nil
 }
 
-func (a *Agent) handleReveal(ctx context.Context, round uint64) (bool, error) {
+func (a *Agent) handleReveal(ctx context.Context, round uint64) error {
 	// reveal requires the commitKey from the same round
 	commitKey, exists := a.state.CommitKey(round)
 	if !exists {
 		// In absence of commitKey, phase is skipped
-		return false, nil
+		return nil
 	}
 
 	// reveal requires sample from previous round
 	sample, exists := a.state.SampleData(round - 1)
 	if !exists {
 		// Sample must have been saved so far
-		return false, fmt.Errorf("sample not found in reveal phase")
+		return fmt.Errorf("sample not found in reveal phase")
 	}
 
 	a.metrics.RevealPhase.Inc()
-	sampleBytes := sample.ReserveSample.Hash.Bytes()
-	txHash, err := a.contract.Reveal(ctx, sample.StorageRadius, sampleBytes, commitKey)
+
+	rsh := sample.ReserveSampleHash.Bytes()
+	txHash, err := a.contract.Reveal(ctx, sample.StorageRadius, rsh, commitKey)
 	if err != nil {
 		a.metrics.ErrReveal.Inc()
-		return false, err
+		return err
 	}
 	a.state.AddFee(ctx, txHash)
 
 	a.state.SetHasRevealed(round)
 
-	return true, nil
+	return nil
 }
 
-func (a *Agent) handleClaim(ctx context.Context, round uint64) (bool, error) {
+func (a *Agent) handleClaim(ctx context.Context, round uint64) error {
 	hasRevealed := a.state.HasRevealed(round)
 	if !hasRevealed {
 		// When there was no reveal in same round, phase is skipped
-		return false, nil
+		return nil
 	}
 
 	a.metrics.ClaimPhase.Inc()
-	// event claimPhase was processed
-
-	err := a.batchExpirer.ExpireBatches(ctx)
-	if err != nil {
-		return false, err
-	}
 
 	isWinner, err := a.contract.IsWinner(ctx)
 	if err != nil {
 		a.metrics.ErrWinner.Inc()
-		return false, err
+		return err
 	}
 
-	if isWinner {
-		a.state.SetLastWonRound(round)
-		a.metrics.Winner.Inc()
-		errBalance := a.state.SetBalance(ctx)
-		if errBalance != nil {
-			a.logger.Info("could not set balance", "err", err)
-		}
-
-		txHash, err := a.contract.Claim(ctx)
-		if err != nil {
-			a.metrics.ErrClaim.Inc()
-			a.logger.Info("error claiming win", "err", err)
-			return false, fmt.Errorf("error claiming win: %w", err)
-		}
-		a.logger.Info("claimed win")
-		if errBalance == nil {
-			errReward := a.state.CalculateWinnerReward(ctx)
-			if errReward != nil {
-				a.logger.Info("calculate winner reward", "err", err)
-			}
-		}
-		a.state.AddFee(ctx, txHash)
-
-	} else {
-		a.logger.Info("claim made, lost round")
+	if !isWinner {
+		a.logger.Info("not a winner")
+		// When there is nothing to claim (node is not a winner), phase is played
+		return nil
 	}
 
-	return true, nil
+	a.state.SetLastWonRound(round)
+	a.metrics.Winner.Inc()
+
+	// In case when there are too many expired batches, Claim trx could runs out of gas.
+	// To prevent this, node should first expire batches before Claiming a reward.
+	err = a.batchExpirer.ExpireBatches(ctx)
+	if err != nil {
+		a.logger.Info("expire batches failed", "err", err)
+		// Even when error happens, proceed with claim handler
+		// because this should not prevent node from claiming a reward
+	}
+
+	errBalance := a.state.SetBalance(ctx)
+	if errBalance != nil {
+		a.logger.Info("could not set balance", "err", err)
+	}
+
+	sampleData, exists := a.state.SampleData(round - 1)
+	if !exists {
+		return fmt.Errorf("sample not found")
+	}
+
+	anchor2, err := a.contract.ReserveSalt(ctx)
+	if err != nil {
+		a.logger.Info("failed getting anchor after second reveal", "err", err)
+	}
+
+	proofs, err := makeInclusionProofs(sampleData.ReserveSampleItems, sampleData.Anchor1, anchor2)
+	if err != nil {
+		return fmt.Errorf("making inclusion proofs: %w", err)
+	}
+
+	txHash, err := a.contract.Claim(ctx, proofs)
+	if err != nil {
+		a.metrics.ErrClaim.Inc()
+		return fmt.Errorf("claiming win: %w", err)
+	}
+
+	a.logger.Info("claimed win")
+
+	if errBalance == nil {
+		errReward := a.state.CalculateWinnerReward(ctx)
+		if errReward != nil {
+			a.logger.Info("calculate winner reward", "err", err)
+		}
+	}
+
+	a.state.AddFee(ctx, txHash)
+
+	return nil
 }
 
 func (a *Agent) handleSample(ctx context.Context, round uint64) (bool, error) {
-	status, err := a.state.Status()
-	if err != nil {
-		return false, err
-	}
+	// minimum proximity between the achor and the stored chunks
+	committedDepth := a.store.CommittedDepth()
 
-	if !status.IsFullySynced {
-		a.logger.Info("skipping round because node is not fully synced", "round", round)
+	if a.state.IsFrozen() {
+		a.logger.Info("skipping round because node is frozen")
 		return false, nil
 	}
 
-	if status.IsFrozen {
-		a.logger.Info("skipping round because node is frozen", "round", round)
-		return false, nil
-	}
-
-	storageRadius := a.radius.StorageRadius()
-
-	isPlaying, err := a.contract.IsPlaying(ctx, storageRadius)
+	isPlaying, err := a.contract.IsPlaying(ctx, committedDepth)
 	if err != nil {
 		a.metrics.ErrCheckIsPlaying.Inc()
 		return false, err
 	}
 	if !isPlaying {
+		a.logger.Info("not playing in this round")
+		return false, nil
+	}
+	a.state.SetLastSelectedRound(round + 1)
+	a.metrics.NeighborhoodSelected.Inc()
+	a.logger.Info("neighbourhood chosen", "round", round)
+
+	if !a.state.IsFullySynced() {
+		a.logger.Info("skipping round because node is not fully synced")
+		return false, nil
+	}
+
+	if !a.state.IsHealthy() {
+		a.logger.Info("skipping round because node is unhealhy", "round", round)
 		return false, nil
 	}
 
 	_, hasFunds, err := a.HasEnoughFundsToPlay(ctx)
 	if err != nil {
-		a.logger.Error(err, "agent HasEnoughFundsToPlay failed")
-		return false, err
-	}
-
-	if !hasFunds {
-		a.logger.Info("insufficient funds to participate in next round", "round", round)
+		return false, fmt.Errorf("has enough funds to play: %w", err)
+	} else if !hasFunds {
+		a.logger.Info("insufficient funds to play in next round", "round", round)
 		a.metrics.InsufficientFundsToPlay.Inc()
 		return false, nil
 	}
 
-	a.state.SetLastPlayedRound(round)
-	a.logger.Info("neighbourhood chosen", "round", round)
-	a.metrics.NeighborhoodSelected.Inc()
-
-	sample, err := a.makeSample(ctx, storageRadius)
+	now := time.Now()
+	sample, err := a.makeSample(ctx, committedDepth)
 	if err != nil {
 		return false, err
 	}
+	dur := time.Since(now)
+	a.metrics.SampleDuration.Set(dur.Seconds())
 
-	a.state.SetSampleData(round, sample)
+	a.logger.Info("produced sample", "hash", sample.ReserveSampleHash, "radius", committedDepth, "round", round)
+
+	a.state.SetSampleData(round, sample, dur)
 
 	return true, nil
 }
 
-func (a *Agent) makeSample(ctx context.Context, storageRadius uint8) (SampleData, error) {
+func (a *Agent) makeSample(ctx context.Context, committedDepth uint8) (SampleData, error) {
 	salt, err := a.contract.ReserveSalt(ctx)
 	if err != nil {
 		return SampleData{}, err
@@ -408,31 +456,37 @@ func (a *Agent) makeSample(ctx context.Context, storageRadius uint8) (SampleData
 		return SampleData{}, err
 	}
 
-	t := time.Now()
-	rSample, err := a.sampler.ReserveSample(ctx, salt, storageRadius, uint64(timeLimiter))
+	rSample, err := a.store.ReserveSample(ctx, salt, committedDepth, uint64(timeLimiter), a.minBatchBalance())
 	if err != nil {
 		return SampleData{}, err
 	}
-	a.metrics.SampleDuration.Set(time.Since(t).Seconds())
+
+	sampleHash, err := sampleHash(rSample.Items)
+	if err != nil {
+		return SampleData{}, err
+	}
 
 	sample := SampleData{
-		ReserveSample: rSample,
-		StorageRadius: storageRadius,
+		Anchor1:            salt,
+		ReserveSampleItems: rSample.Items,
+		ReserveSampleHash:  sampleHash,
+		StorageRadius:      committedDepth,
 	}
 
 	return sample, nil
 }
 
+func (a *Agent) minBatchBalance() *big.Int {
+	cs := a.chainStateGetter.GetChainState()
+	nextRoundBlockNumber := ((a.state.currentBlock() / a.blocksPerRound) + 2) * a.blocksPerRound
+	difference := nextRoundBlockNumber - cs.Block
+	minBalance := new(big.Int).Add(cs.TotalAmount, new(big.Int).Mul(cs.CurrentPrice, big.NewInt(int64(difference))))
+
+	return minBalance
+}
+
 func (a *Agent) getPreviousRoundTime(ctx context.Context) (time.Duration, error) {
-
-	a.metrics.BackendCalls.Inc()
-	block, err := a.backend.BlockNumber(ctx)
-	if err != nil {
-		a.metrics.BackendErrors.Inc()
-		return 0, err
-	}
-
-	previousRoundBlockNumber := ((block / a.blocksPerRound) - 1) * a.blocksPerRound
+	previousRoundBlockNumber := ((a.state.currentBlock() / a.blocksPerRound) - 1) * a.blocksPerRound
 
 	a.metrics.BackendCalls.Inc()
 	timeLimiterBlock, err := a.backend.HeaderByNumber(ctx, new(big.Int).SetUint64(previousRoundBlockNumber))
@@ -452,13 +506,13 @@ func (a *Agent) commit(ctx context.Context, sample SampleData, round uint64) err
 		return err
 	}
 
-	sampleBytes := sample.ReserveSample.Hash.Bytes()
-	obfuscatedHash, err := a.wrapCommit(sample.StorageRadius, sampleBytes, key)
+	rsh := sample.ReserveSampleHash.Bytes()
+	obfuscatedHash, err := a.wrapCommit(sample.StorageRadius, rsh, key)
 	if err != nil {
 		return err
 	}
 
-	txHash, err := a.contract.Commit(ctx, obfuscatedHash, big.NewInt(int64(round)))
+	txHash, err := a.contract.Commit(ctx, obfuscatedHash, round)
 	if err != nil {
 		a.metrics.ErrCommit.Inc()
 		return err
@@ -471,7 +525,6 @@ func (a *Agent) commit(ctx context.Context, sample SampleData, round uint64) err
 }
 
 func (a *Agent) Close() error {
-
 	close(a.quit)
 
 	stopped := make(chan struct{})
@@ -489,7 +542,6 @@ func (a *Agent) Close() error {
 }
 
 func (a *Agent) wrapCommit(storageRadius uint8, sample []byte, key []byte) ([]byte, error) {
-
 	storageRadiusByte := []byte{storageRadius}
 
 	data := append(a.overlay.Bytes(), storageRadiusByte...)
@@ -502,6 +554,48 @@ func (a *Agent) wrapCommit(storageRadius uint8, sample []byte, key []byte) ([]by
 // Status returns the node status
 func (a *Agent) Status() (*Status, error) {
 	return a.state.Status()
+}
+
+type SampleWithProofs struct {
+	Hash     swarm.Address                       `json:"hash"`
+	Proofs   redistribution.ChunkInclusionProofs `json:"proofs"`
+	Duration time.Duration                       `json:"duration"`
+}
+
+// SampleWithProofs is called only by rchash API
+func (a *Agent) SampleWithProofs(
+	ctx context.Context,
+	anchor1 []byte,
+	anchor2 []byte,
+	storageRadius uint8,
+) (SampleWithProofs, error) {
+	sampleStartTime := time.Now()
+
+	timeLimiter, err := a.getPreviousRoundTime(ctx)
+	if err != nil {
+		return SampleWithProofs{}, err
+	}
+
+	rSample, err := a.store.ReserveSample(ctx, anchor1, storageRadius, uint64(timeLimiter), a.minBatchBalance())
+	if err != nil {
+		return SampleWithProofs{}, err
+	}
+
+	hash, err := sampleHash(rSample.Items)
+	if err != nil {
+		return SampleWithProofs{}, fmt.Errorf("sample hash: %w", err)
+	}
+
+	proofs, err := makeInclusionProofs(rSample.Items, anchor1, anchor2)
+	if err != nil {
+		return SampleWithProofs{}, fmt.Errorf("make proofs: %w", err)
+	}
+
+	return SampleWithProofs{
+		Hash:     hash,
+		Proofs:   proofs,
+		Duration: time.Since(sampleStartTime),
+	}, nil
 }
 
 func (a *Agent) HasEnoughFundsToPlay(ctx context.Context) (*big.Int, bool, error) {

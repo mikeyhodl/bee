@@ -19,20 +19,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec"
-	"github.com/ethersphere/bee/pkg/api"
-	"github.com/ethersphere/bee/pkg/crypto"
-	"github.com/ethersphere/bee/pkg/jsonhttp"
-	"github.com/ethersphere/bee/pkg/jsonhttp/jsonhttptest"
-	"github.com/ethersphere/bee/pkg/log"
-	"github.com/ethersphere/bee/pkg/postage"
-	mockpost "github.com/ethersphere/bee/pkg/postage/mock"
-	"github.com/ethersphere/bee/pkg/pss"
-	"github.com/ethersphere/bee/pkg/pushsync"
-	"github.com/ethersphere/bee/pkg/spinlock"
-	"github.com/ethersphere/bee/pkg/storage/mock"
-	"github.com/ethersphere/bee/pkg/swarm"
-	"github.com/ethersphere/bee/pkg/util/testutil"
+	"github.com/ethersphere/bee/v2/pkg/api"
+	"github.com/ethersphere/bee/v2/pkg/crypto"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp/jsonhttptest"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/postage"
+	mockpost "github.com/ethersphere/bee/v2/pkg/postage/mock"
+	"github.com/ethersphere/bee/v2/pkg/pss"
+	"github.com/ethersphere/bee/v2/pkg/pushsync"
+	"github.com/ethersphere/bee/v2/pkg/spinlock"
+	mockstorer "github.com/ethersphere/bee/v2/pkg/storer/mock"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/util/testutil"
 	"github.com/gorilla/websocket"
 )
 
@@ -89,7 +88,6 @@ func TestPssWebsocketSingleHandlerDeregister(t *testing.T) {
 	)
 
 	err := cl.SetReadDeadline(time.Now().Add(longTimeout))
-
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,8 +162,6 @@ func TestPssWebsocketMultiHandler(t *testing.T) {
 // TestPssSend tests that the pss message sending over http works correctly.
 func TestPssSend(t *testing.T) {
 	var (
-		logger = log.Noop
-
 		mtx             sync.Mutex
 		receivedTopic   pss.Topic
 		receivedBytes   []byte
@@ -173,7 +169,7 @@ func TestPssSend(t *testing.T) {
 		done            bool
 
 		privk, _       = crypto.GenerateSecp256k1Key()
-		publicKeyBytes = (*btcec.PublicKey)(&privk.PublicKey).SerializeCompressed()
+		publicKeyBytes = crypto.EncodeSecp256k1PublicKey(&privk.PublicKey)
 
 		sendFn = func(ctx context.Context, targets pss.Targets, chunk swarm.Chunk) error {
 			mtx.Lock()
@@ -189,8 +185,7 @@ func TestPssSend(t *testing.T) {
 		p               = newMockPss(sendFn)
 		client, _, _, _ = newTestServer(t, testServerOptions{
 			Pss:    p,
-			Storer: mock.NewStorer(),
-			Logger: logger,
+			Storer: mockstorer.New(),
 			Post:   mp,
 		})
 
@@ -206,13 +201,19 @@ func TestPssSend(t *testing.T) {
 	}
 
 	t.Run("err - bad batch", func(t *testing.T) {
-		hexbatch := hex.EncodeToString(batchInvalid)
+		hexbatch := "abcdefgg"
 		jsonhttptest.Request(t, client, http.MethodPost, "/pss/send/to/12", http.StatusBadRequest,
 			jsonhttptest.WithRequestHeader(api.SwarmPostageBatchIdHeader, hexbatch),
 			jsonhttptest.WithRequestBody(bytes.NewReader(payload)),
 			jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
-				Message: "invalid postage batch id",
 				Code:    http.StatusBadRequest,
+				Message: "invalid header params",
+				Reasons: []jsonhttp.Reason{
+					{
+						Field: api.SwarmPostageBatchIdHeader,
+						Error: api.HexInvalidByteError('g').Error(),
+					},
+				},
 			}),
 		)
 	})
@@ -384,7 +385,7 @@ func newPssTest(t *testing.T, o opts) (pss.Interface, *ecdsa.PublicKey, *websock
 	_, cl, listener, _ := newTestServer(t, testServerOptions{
 		Pss:          pss,
 		WsPath:       "/pss/subscribe/testtopic",
-		Storer:       mock.NewStorer(),
+		Storer:       mockstorer.New(),
 		Logger:       log.Noop,
 		WsPingPeriod: o.pingPeriod,
 	})
@@ -392,7 +393,7 @@ func newPssTest(t *testing.T, o opts) (pss.Interface, *ecdsa.PublicKey, *websock
 	return pss, &privkey.PublicKey, cl, listener
 }
 
-func Test_pssPostHandler_invalidInputs(t *testing.T) {
+func TestPssPostHandlerInvalidInputs(t *testing.T) {
 	t.Parallel()
 
 	client, _, _, _ := newTestServer(t, testServerOptions{})
@@ -433,7 +434,6 @@ func Test_pssPostHandler_invalidInputs(t *testing.T) {
 	}}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -444,10 +444,12 @@ func Test_pssPostHandler_invalidInputs(t *testing.T) {
 	}
 }
 
-type pssSendFn func(context.Context, pss.Targets, swarm.Chunk) error
-type mpss struct {
-	f pssSendFn
-}
+type (
+	pssSendFn func(context.Context, pss.Targets, swarm.Chunk) error
+	mpss      struct {
+		f pssSendFn
+	}
+)
 
 func newMockPss(f pssSendFn) *mpss {
 	return &mpss{f}

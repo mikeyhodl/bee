@@ -10,8 +10,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ethersphere/bee/pkg/log"
-	"github.com/ethersphere/bee/pkg/storage"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/storage"
 
 	ldberr "github.com/syndtr/goleveldb/leveldb/errors"
 
@@ -24,7 +24,9 @@ import (
 // loggerName is the tree path name of the logger for this package.
 const loggerName = "leveldb"
 
-var _ storage.StateStorer = (*Store)(nil)
+var (
+	_ storage.StateStorer = (*Store)(nil)
+)
 
 // Store uses LevelDB to store values.
 type Store struct {
@@ -41,10 +43,6 @@ func NewInMemoryStateStore(l log.Logger) (*Store, error) {
 	s := &Store{
 		db:     ldb,
 		logger: l.WithName(loggerName).Register(),
-	}
-
-	if err := migrate(s); err != nil {
-		return nil, err
 	}
 
 	return s, nil
@@ -73,34 +71,7 @@ func NewStateStore(path string, l log.Logger) (*Store, error) {
 		logger: l,
 	}
 
-	if err := migrate(s); err != nil {
-		return nil, err
-	}
-
 	return s, nil
-}
-
-func migrate(s *Store) error {
-	sn, err := s.getSchemaName()
-	if err != nil {
-		if !errors.Is(err, storage.ErrNotFound) {
-			_ = s.Close()
-			return fmt.Errorf("get schema name: %w", err)
-		}
-		// new statestore - put schema key with current name
-		if err := s.putSchemaName(dbSchemaCurrent); err != nil {
-			_ = s.Close()
-			return fmt.Errorf("put schema name: %w", err)
-		}
-		sn = dbSchemaCurrent
-	}
-
-	if err = s.migrate(sn); err != nil {
-		_ = s.Close()
-		return fmt.Errorf("migrate: %w", err)
-	}
-
-	return nil
 }
 
 // Get retrieves a value of the requested key. If no results are found,
@@ -156,26 +127,6 @@ func (s *Store) Iterate(prefix string, iterFunc storage.StateIterFunc) (err erro
 		}
 	}
 	return iter.Error()
-}
-
-func (s *Store) getSchemaName() (string, error) {
-	name, err := s.db.Get([]byte(dbSchemaKey), nil)
-	if err != nil {
-		if errors.Is(err, leveldb.ErrNotFound) {
-			return "", storage.ErrNotFound
-		}
-		return "", err
-	}
-	return string(name), nil
-}
-
-func (s *Store) putSchemaName(val string) error {
-	return s.db.Put([]byte(dbSchemaKey), []byte(val), nil)
-}
-
-// DB implements StateStorer.DB method.
-func (s *Store) DB() *leveldb.DB {
-	return s.db
 }
 
 // Close releases the resources used by the store.

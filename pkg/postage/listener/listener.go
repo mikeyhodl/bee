@@ -16,11 +16,11 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethersphere/bee/pkg/log"
-	"github.com/ethersphere/bee/pkg/postage"
-	"github.com/ethersphere/bee/pkg/postage/batchservice"
-	"github.com/ethersphere/bee/pkg/transaction"
-	"github.com/ethersphere/bee/pkg/util"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/postage"
+	"github.com/ethersphere/bee/v2/pkg/postage/batchservice"
+	"github.com/ethersphere/bee/v2/pkg/transaction"
+	"github.com/ethersphere/bee/v2/pkg/util/syncutil"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -40,6 +40,7 @@ var (
 
 var (
 	ErrPostageSyncingStalled = errors.New("postage syncing stalled")
+	ErrPostagePaused         = errors.New("postage contract is paused")
 )
 
 type BlockHeightContractFilterer interface {
@@ -59,17 +60,18 @@ type listener struct {
 	metrics                     metrics
 	stallingTimeout             time.Duration
 	backoffTime                 time.Duration
-	syncingStopped              *util.Signaler
+	syncingStopped              *syncutil.Signaler
 
 	// Cached postage stamp contract event topics.
 	batchCreatedTopic       common.Hash
 	batchTopUpTopic         common.Hash
 	batchDepthIncreaseTopic common.Hash
 	priceUpdateTopic        common.Hash
+	pausedTopic             common.Hash
 }
 
 func New(
-	syncingStopped *util.Signaler,
+	syncingStopped *syncutil.Signaler,
 	logger log.Logger,
 	ev BlockHeightContractFilterer,
 	postageStampContractAddress common.Address,
@@ -94,6 +96,7 @@ func New(
 		batchTopUpTopic:         postageStampContractABI.Events["BatchTopUp"].ID,
 		batchDepthIncreaseTopic: postageStampContractABI.Events["BatchDepthIncrease"].ID,
 		priceUpdateTopic:        postageStampContractABI.Events["PriceUpdate"].ID,
+		pausedTopic:             postageStampContractABI.Events["Paused"].ID,
 	}
 }
 
@@ -110,6 +113,7 @@ func (l *listener) filterQuery(from, to *big.Int) ethereum.FilterQuery {
 				l.batchTopUpTopic,
 				l.batchDepthIncreaseTopic,
 				l.priceUpdateTopic,
+				l.pausedTopic,
 			},
 		},
 	}
@@ -172,6 +176,9 @@ func (l *listener) processEvent(e types.Log, updater postage.EventUpdater) error
 			c.Price,
 			e.TxHash,
 		)
+	case l.pausedTopic:
+		l.logger.Warning("Postage contract is paused.")
+		return ErrPostagePaused
 	default:
 		l.metrics.EventErrors.Inc()
 		return errors.New("unknown event")
@@ -235,8 +242,7 @@ func (l *listener) Listen(ctx context.Context, from uint64, updater postage.Even
 
 	synced := make(chan error)
 	closeOnce := new(sync.Once)
-	paged := make(chan struct{}, 1)
-	paged <- struct{}{}
+	paged := true
 
 	lastProgress := time.Now()
 	lastConfirmedBlock := uint64(0)
@@ -252,6 +258,12 @@ func (l *listener) Listen(ctx context.Context, from uint64, updater postage.Even
 				return ErrPostageSyncingStalled
 			}
 
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
 			// if we have a last blocknumber from the backend we can make a good estimate on when we need to requery
 			// otherwise we just use the backoff time
 			var expectedWaitTime time.Duration
@@ -263,13 +275,16 @@ func (l *listener) Listen(ctx context.Context, from uint64, updater postage.Even
 				expectedWaitTime = l.backoffTime
 			}
 
-			select {
-			case <-paged:
-				// if we paged then it means there's more things to sync on
-			case <-time.After(expectedWaitTime):
-			case <-ctx.Done():
-				return context.Canceled
+			if !paged {
+				l.logger.Debug("sleeping until next block batch", "duration", expectedWaitTime)
+				select {
+				case <-time.After(expectedWaitTime):
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 			}
+			paged = false
+
 			start := time.Now()
 
 			l.metrics.BackendCalls.Inc()
@@ -304,7 +319,7 @@ func (l *listener) Listen(ctx context.Context, from uint64, updater postage.Even
 
 			// do some paging (sub-optimal)
 			if to-from >= blockPage {
-				paged <- struct{}{}
+				paged = true
 				to = from + blockPage - 1
 			} else {
 				closeOnce.Do(func() { synced <- nil })
@@ -314,7 +329,7 @@ func (l *listener) Listen(ctx context.Context, from uint64, updater postage.Even
 			events, err := l.ev.FilterLogs(ctx, l.filterQuery(big.NewInt(int64(from)), big.NewInt(int64(to))))
 			if err != nil {
 				l.metrics.BackendErrors.Inc()
-				l.logger.Warning("could not get logs", "error", err)
+				l.logger.Warning("could not get blockchain log", "error", err)
 				lastConfirmedBlock = 0
 				continue
 			}
@@ -334,8 +349,8 @@ func (l *listener) Listen(ctx context.Context, from uint64, updater postage.Even
 		err := listenf()
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				// context cancelled is returned on shutdown,
-				// therefore we do nothing here
+				// Context cancelled is returned on shutdown, therefore we do nothing here.
+				l.logger.Debug("shutting down event listener")
 				return
 			}
 			l.logger.Error(err, "failed syncing event listener; shutting down node error")

@@ -10,25 +10,27 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/ethereum/go-ethereum/common"
 	"math/big"
 	"net/http"
 	"strconv"
 	"testing"
 	"time"
 
-	"github.com/ethersphere/bee/pkg/api"
-	"github.com/ethersphere/bee/pkg/bigint"
-	"github.com/ethersphere/bee/pkg/jsonhttp"
-	"github.com/ethersphere/bee/pkg/jsonhttp/jsonhttptest"
-	"github.com/ethersphere/bee/pkg/postage"
-	"github.com/ethersphere/bee/pkg/postage/batchstore/mock"
-	mockpost "github.com/ethersphere/bee/pkg/postage/mock"
-	"github.com/ethersphere/bee/pkg/postage/postagecontract"
-	contractMock "github.com/ethersphere/bee/pkg/postage/postagecontract/mock"
-	postagetesting "github.com/ethersphere/bee/pkg/postage/testing"
-	"github.com/ethersphere/bee/pkg/sctx"
-	"github.com/ethersphere/bee/pkg/transaction/backendmock"
+	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/ethersphere/bee/v2/pkg/api"
+	"github.com/ethersphere/bee/v2/pkg/bigint"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp/jsonhttptest"
+	"github.com/ethersphere/bee/v2/pkg/postage"
+	"github.com/ethersphere/bee/v2/pkg/postage/batchstore/mock"
+	mockpost "github.com/ethersphere/bee/v2/pkg/postage/mock"
+	"github.com/ethersphere/bee/v2/pkg/postage/postagecontract"
+	contractMock "github.com/ethersphere/bee/v2/pkg/postage/postagecontract/mock"
+	postagetesting "github.com/ethersphere/bee/v2/pkg/postage/testing"
+	"github.com/ethersphere/bee/v2/pkg/sctx"
+	mockstorer "github.com/ethersphere/bee/v2/pkg/storer/mock"
+	"github.com/ethersphere/bee/v2/pkg/transaction/backendmock"
 )
 
 func TestPostageCreateStamp(t *testing.T) {
@@ -36,7 +38,7 @@ func TestPostageCreateStamp(t *testing.T) {
 
 	batchID := []byte{1, 2, 3, 4}
 	initialBalance := int64(1000)
-	depth := uint8(1)
+	depth := uint8(24)
 	label := "label"
 	txHash := common.HexToHash("0x1234")
 	createBatch := func(amount int64, depth uint8, label string) string {
@@ -46,11 +48,13 @@ func TestPostageCreateStamp(t *testing.T) {
 	t.Run("ok", func(t *testing.T) {
 		t.Parallel()
 
+		var immutable bool
 		contract := contractMock.New(
 			contractMock.WithCreateBatchFunc(func(ctx context.Context, ib *big.Int, d uint8, i bool, l string) (common.Hash, []byte, error) {
 				if ib.Cmp(big.NewInt(initialBalance)) != 0 {
 					return common.Hash{}, nil, fmt.Errorf("called with wrong initial balance. wanted %d, got %d", initialBalance, ib)
 				}
+				immutable = i
 				if d != depth {
 					return common.Hash{}, nil, fmt.Errorf("called with wrong depth. wanted %d, got %d", depth, d)
 				}
@@ -61,7 +65,6 @@ func TestPostageCreateStamp(t *testing.T) {
 			}),
 		)
 		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:        true,
 			PostageContract: contract,
 		})
 
@@ -71,39 +74,10 @@ func TestPostageCreateStamp(t *testing.T) {
 				TxHash:  txHash.String(),
 			}),
 		)
-	})
-	t.Run("with-custom-gas", func(t *testing.T) {
-		t.Parallel()
 
-		contract := contractMock.New(
-			contractMock.WithCreateBatchFunc(func(ctx context.Context, ib *big.Int, d uint8, i bool, l string) (common.Hash, []byte, error) {
-				if ib.Cmp(big.NewInt(initialBalance)) != 0 {
-					return common.Hash{}, nil, fmt.Errorf("called with wrong initial balance. wanted %d, got %d", initialBalance, ib)
-				}
-				if d != depth {
-					return common.Hash{}, nil, fmt.Errorf("called with wrong depth. wanted %d, got %d", depth, d)
-				}
-				if l != label {
-					return common.Hash{}, nil, fmt.Errorf("called with wrong label. wanted %s, got %s", label, l)
-				}
-				if sctx.GetGasPrice(ctx).Cmp(big.NewInt(10000)) != 0 {
-					return common.Hash{}, nil, fmt.Errorf("called with wrong gas price. wanted %d, got %d", 10000, sctx.GetGasPrice(ctx))
-				}
-				return txHash, batchID, nil
-			}),
-		)
-		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:        true,
-			PostageContract: contract,
-		})
-
-		jsonhttptest.Request(t, ts, http.MethodPost, createBatch(initialBalance, depth, label), http.StatusCreated,
-			jsonhttptest.WithRequestHeader("Gas-Price", "10000"),
-			jsonhttptest.WithExpectedJSONResponse(&api.PostageCreateResponse{
-				BatchID: batchID,
-				TxHash:  txHash.String(),
-			}),
-		)
+		if !immutable {
+			t.Fatalf("default batch should be immutable")
+		}
 	})
 
 	t.Run("with-error", func(t *testing.T) {
@@ -115,7 +89,6 @@ func TestPostageCreateStamp(t *testing.T) {
 			}),
 		)
 		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:        true,
 			PostageContract: contract,
 		})
 
@@ -136,7 +109,6 @@ func TestPostageCreateStamp(t *testing.T) {
 			}),
 		)
 		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:        true,
 			PostageContract: contract,
 		})
 
@@ -157,19 +129,24 @@ func TestPostageCreateStamp(t *testing.T) {
 			}),
 		)
 		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:        true,
 			PostageContract: contract,
 		})
 
 		jsonhttptest.Request(t, ts, http.MethodPost, "/stamps/1000/9", http.StatusBadRequest,
 			jsonhttptest.WithExpectedJSONResponse(&jsonhttp.StatusResponse{
 				Code:    http.StatusBadRequest,
-				Message: "invalid depth",
+				Message: "invalid path params",
+				Reasons: []jsonhttp.Reason{
+					{
+						Field: "depth",
+						Error: "want min:17",
+					},
+				},
 			}),
 		)
 	})
 
-	t.Run("immutable header", func(t *testing.T) {
+	t.Run("mutable header", func(t *testing.T) {
 		t.Parallel()
 
 		var immutable bool
@@ -180,54 +157,26 @@ func TestPostageCreateStamp(t *testing.T) {
 			}),
 		)
 		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:        true,
 			PostageContract: contract,
 		})
 
 		jsonhttptest.Request(t, ts, http.MethodPost, "/stamps/1000/24", http.StatusCreated,
-			jsonhttptest.WithRequestHeader("Immutable", "true"),
+			jsonhttptest.WithRequestHeader(api.ImmutableHeader, "false"),
 			jsonhttptest.WithExpectedJSONResponse(&api.PostageCreateResponse{
 				BatchID: batchID,
 				TxHash:  txHash.String(),
 			}),
 		)
 
-		if !immutable {
-			t.Fatalf("want true, got %v", immutable)
+		if immutable {
+			t.Fatalf("want false, got %v", immutable)
 		}
-	})
-
-	t.Run("gas limit header", func(t *testing.T) {
-		t.Parallel()
-
-		contract := contractMock.New(
-			contractMock.WithCreateBatchFunc(func(ctx context.Context, _ *big.Int, _ uint8, _ bool, _ string) (common.Hash, []byte, error) {
-				gasLimit := sctx.GetGasLimit(ctx)
-				if gasLimit != 2000000 {
-					t.Fatalf("want 2000000, got %d", gasLimit)
-				}
-				return txHash, batchID, nil
-			}),
-		)
-		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:        true,
-			PostageContract: contract,
-		})
-
-		jsonhttptest.Request(t, ts, http.MethodPost, "/stamps/1000/24", http.StatusCreated,
-			jsonhttptest.WithRequestHeader("Gas-Limit", "2000000"),
-			jsonhttptest.WithExpectedJSONResponse(&api.PostageCreateResponse{
-				BatchID: batchID,
-				TxHash:  txHash.String(),
-			}),
-		)
 	})
 
 	t.Run("syncing in progress", func(t *testing.T) {
 		t.Parallel()
 
 		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:   true,
 			SyncStatus: func() (bool, error) { return false, nil },
 		})
 
@@ -242,7 +191,6 @@ func TestPostageCreateStamp(t *testing.T) {
 		t.Parallel()
 
 		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:   true,
 			SyncStatus: func() (bool, error) { return true, errors.New("oops") },
 		})
 
@@ -268,7 +216,7 @@ func TestPostageGetStamps(t *testing.T) {
 		t.Parallel()
 
 		bs := mock.New(mock.WithChainState(cs), mock.WithBatch(b))
-		ts, _, _, _ := newTestServer(t, testServerOptions{DebugAPI: true, Post: mp, BatchStore: bs, BlockTime: 2 * time.Second})
+		ts, _, _, _ := newTestServer(t, testServerOptions{Post: mp, BatchStore: bs, BlockTime: 2 * time.Second})
 
 		jsonhttptest.Request(t, ts, http.MethodGet, "/stamps", http.StatusOK,
 			jsonhttptest.WithExpectedJSONResponse(&api.PostageStampsResponse{
@@ -285,72 +233,6 @@ func TestPostageGetStamps(t *testing.T) {
 						ImmutableFlag: si.ImmutableFlag(),
 						Exists:        true,
 						BatchTTL:      15, // ((value-totalAmount)/pricePerBlock)*blockTime=((20-5)/2)*2.
-						Expired:       false,
-					},
-				},
-			}),
-		)
-	})
-
-	t.Run("expired batch", func(t *testing.T) {
-		t.Parallel()
-
-		bsForNonExistingBatch := mock.New(mock.WithChainState(cs))
-		tsForNonExistingBatch, _, _, _ := newTestServer(t, testServerOptions{DebugAPI: true, Post: mp, BatchStore: bsForNonExistingBatch, BlockTime: 2 * time.Second})
-
-		jsonhttptest.Request(t, tsForNonExistingBatch, http.MethodGet, "/stamps", http.StatusOK,
-			jsonhttptest.WithExpectedJSONResponse(&api.PostageStampsResponse{Stamps: []api.PostageStampResponse{}}),
-		)
-
-		jsonhttptest.Request(t, tsForNonExistingBatch, http.MethodGet, "/stamps?all=true", http.StatusOK,
-			jsonhttptest.WithExpectedJSONResponse(&api.PostageStampsResponse{
-				Stamps: []api.PostageStampResponse{
-					{
-						BatchID:       b.ID,
-						Utilization:   si.Utilization(),
-						Usable:        false,
-						Label:         si.Label(),
-						Depth:         si.Depth(),
-						Amount:        bigint.Wrap(si.Amount()),
-						BucketDepth:   si.BucketDepth(),
-						BlockNumber:   si.BlockNumber(),
-						ImmutableFlag: si.ImmutableFlag(),
-						Exists:        false,
-						BatchTTL:      -1,
-					},
-				},
-			}),
-		)
-	})
-
-	t.Run("expired Stamp", func(t *testing.T) {
-		t.Parallel()
-
-		eb := postagetesting.MustNewBatch(postagetesting.WithValue(20))
-
-		esi := postage.NewStampIssuer("", "", eb.ID, big.NewInt(3), 11, 10, 1000, true)
-		emp := mockpost.New(mockpost.WithIssuer(esi))
-		emp.HandleStampExpiry(eb.ID)
-		ecs := &postage.ChainState{Block: 10, TotalAmount: big.NewInt(15), CurrentPrice: big.NewInt(12)}
-		ebs := mock.New(mock.WithChainState(ecs))
-		ts, _, _, _ := newTestServer(t, testServerOptions{DebugAPI: true, Post: emp, BatchStore: ebs, BlockTime: 2 * time.Second})
-
-		jsonhttptest.Request(t, ts, http.MethodGet, "/stamps?all=true", http.StatusOK,
-			jsonhttptest.WithExpectedJSONResponse(&api.PostageStampsResponse{
-				Stamps: []api.PostageStampResponse{
-					{
-						BatchID:       eb.ID,
-						Utilization:   esi.Utilization(),
-						Usable:        false,
-						Label:         esi.Label(),
-						Depth:         esi.Depth(),
-						Amount:        bigint.Wrap(si.Amount()),
-						BucketDepth:   esi.BucketDepth(),
-						BlockNumber:   esi.BlockNumber(),
-						ImmutableFlag: esi.ImmutableFlag(),
-						Exists:        false,
-						BatchTTL:      -1, // ((value-totalAmount)/pricePerBlock)*blockTime=((20-5)/2)*2.
-						Expired:       true,
 					},
 				},
 			}),
@@ -364,25 +246,18 @@ func TestPostageGetStamps(t *testing.T) {
 
 		esi := postage.NewStampIssuer("", "", eb.ID, big.NewInt(3), 11, 10, 1000, true)
 		emp := mockpost.New(mockpost.WithIssuer(esi))
-		emp.HandleStampExpiry(eb.ID)
+		err := emp.HandleStampExpiry(context.Background(), eb.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
 		ecs := &postage.ChainState{Block: 10, TotalAmount: big.NewInt(15), CurrentPrice: big.NewInt(12)}
 		ebs := mock.New(mock.WithChainState(ecs))
-		ts, _, _, _ := newTestServer(t, testServerOptions{DebugAPI: true, Post: emp, BatchStore: ebs, BlockTime: 2 * time.Second})
+		ts, _, _, _ := newTestServer(t, testServerOptions{Post: emp, BatchStore: ebs, BlockTime: 2 * time.Second})
 
-		jsonhttptest.Request(t, ts, http.MethodGet, "/stamps/"+hex.EncodeToString(eb.ID), http.StatusOK,
-			jsonhttptest.WithExpectedJSONResponse(&api.PostageStampResponse{
-				BatchID:       eb.ID,
-				Utilization:   esi.Utilization(),
-				Usable:        false,
-				Label:         esi.Label(),
-				Depth:         esi.Depth(),
-				Amount:        bigint.Wrap(esi.Amount()),
-				BucketDepth:   esi.BucketDepth(),
-				BlockNumber:   esi.BlockNumber(),
-				ImmutableFlag: esi.ImmutableFlag(),
-				Exists:        false,
-				BatchTTL:      -1, // ((value-totalAmount)/pricePerBlock)*blockTime=((20-5)/2)*2.
-				Expired:       true,
+		jsonhttptest.Request(t, ts, http.MethodGet, "/stamps/"+hex.EncodeToString(eb.ID), http.StatusNotFound,
+			jsonhttptest.WithExpectedJSONResponse(&jsonhttp.StatusResponse{
+				Message: "issuer does not exist",
+				Code:    404,
 			}),
 		)
 	})
@@ -399,22 +274,21 @@ func TestGetAllBatches(t *testing.T) {
 	mp := mockpost.New(mockpost.WithIssuer(si))
 	cs := &postage.ChainState{Block: 10, TotalAmount: big.NewInt(5), CurrentPrice: big.NewInt(2)}
 	bs := mock.New(mock.WithChainState(cs), mock.WithBatch(b))
-	ts, _, _, _ := newTestServer(t, testServerOptions{DebugAPI: true, Post: mp, BatchStore: bs, BlockTime: 2 * time.Second})
+	ts, _, _, _ := newTestServer(t, testServerOptions{Post: mp, BatchStore: bs, BlockTime: 2 * time.Second})
 
 	oneBatch := struct {
 		Batches []api.PostageBatchResponse `json:"batches"`
 	}{
 		Batches: []api.PostageBatchResponse{
 			{
-				BatchID:       b.ID,
-				Value:         bigint.Wrap(b.Value),
-				Start:         b.Start,
-				Owner:         b.Owner,
-				Depth:         b.Depth,
-				BucketDepth:   b.BucketDepth,
-				Immutable:     b.Immutable,
-				StorageRadius: b.StorageRadius,
-				BatchTTL:      15, // ((value-totalAmount)/pricePerBlock)*blockTime=((20-5)/2)*2.
+				BatchID:     b.ID,
+				Value:       bigint.Wrap(b.Value),
+				Start:       b.Start,
+				Owner:       b.Owner,
+				Depth:       b.Depth,
+				BucketDepth: b.BucketDepth,
+				Immutable:   b.Immutable,
+				BatchTTL:    15, // ((value-totalAmount)/pricePerBlock)*blockTime=((20-5)/2)*2.
 			},
 		},
 	}
@@ -437,7 +311,7 @@ func TestPostageGetStamp(t *testing.T) {
 	mp := mockpost.New(mockpost.WithIssuer(si))
 	cs := &postage.ChainState{Block: 10, TotalAmount: big.NewInt(5), CurrentPrice: big.NewInt(2)}
 	bs := mock.New(mock.WithChainState(cs), mock.WithBatch(b))
-	ts, _, _, _ := newTestServer(t, testServerOptions{DebugAPI: true, Post: mp, BatchStore: bs, BlockTime: 2 * time.Second})
+	ts, _, _, _ := newTestServer(t, testServerOptions{Post: mp, BatchStore: bs, BlockTime: 2 * time.Second})
 
 	t.Run("ok", func(t *testing.T) {
 		t.Parallel()
@@ -465,7 +339,7 @@ func TestPostageGetBuckets(t *testing.T) {
 
 	si := postage.NewStampIssuer("", "", batchOk, big.NewInt(3), 11, 10, 1000, true)
 	mp := mockpost.New(mockpost.WithIssuer(si))
-	ts, _, _, _ := newTestServer(t, testServerOptions{Post: mp, DebugAPI: true})
+	ts, _, _, _ := newTestServer(t, testServerOptions{Post: mp})
 	buckets := make([]api.BucketData, 1024)
 	for i := range buckets {
 		buckets[i] = api.BucketData{BucketID: uint32(i)}
@@ -488,11 +362,10 @@ func TestPostageGetBuckets(t *testing.T) {
 		t.Parallel()
 
 		mpNotFound := mockpost.New()
-		tsNotFound, _, _, _ := newTestServer(t, testServerOptions{Post: mpNotFound, DebugAPI: true})
+		tsNotFound, _, _, _ := newTestServer(t, testServerOptions{Post: mpNotFound})
 
 		jsonhttptest.Request(t, tsNotFound, http.MethodGet, "/stamps/"+batchOkStr+"/buckets", http.StatusNotFound)
 	})
-
 }
 
 func TestReserveState(t *testing.T) {
@@ -502,10 +375,8 @@ func TestReserveState(t *testing.T) {
 		t.Parallel()
 
 		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI: true,
-			BatchStore: mock.New(mock.WithReserveState(&postage.ReserveState{
-				Radius: 5,
-			})),
+			BatchStore: mock.New(mock.WithRadius(5)),
+			Storer:     mockstorer.New(),
 		})
 		jsonhttptest.Request(t, ts, http.MethodGet, "/reservestate", http.StatusOK,
 			jsonhttptest.WithExpectedJSONResponse(&api.ReserveStateResponse{
@@ -517,14 +388,15 @@ func TestReserveState(t *testing.T) {
 		t.Parallel()
 
 		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:   true,
 			BatchStore: mock.New(),
+			Storer:     mockstorer.New(),
 		})
 		jsonhttptest.Request(t, ts, http.MethodGet, "/reservestate", http.StatusOK,
 			jsonhttptest.WithExpectedJSONResponse(&api.ReserveStateResponse{}),
 		)
 	})
 }
+
 func TestChainState(t *testing.T) {
 	t.Parallel()
 
@@ -537,7 +409,6 @@ func TestChainState(t *testing.T) {
 			CurrentPrice: big.NewInt(5),
 		}
 		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:   true,
 			BatchStore: mock.New(mock.WithChainState(cs)),
 			BackendOpts: []backendmock.Option{backendmock.WithBlockNumberFunc(func(ctx context.Context) (uint64, error) {
 				return 1, nil
@@ -552,7 +423,6 @@ func TestChainState(t *testing.T) {
 			}),
 		)
 	})
-
 }
 
 func TestPostageTopUpStamp(t *testing.T) {
@@ -579,7 +449,6 @@ func TestPostageTopUpStamp(t *testing.T) {
 			}),
 		)
 		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:        true,
 			PostageContract: contract,
 		})
 
@@ -609,12 +478,11 @@ func TestPostageTopUpStamp(t *testing.T) {
 			}),
 		)
 		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:        true,
 			PostageContract: contract,
 		})
 
 		jsonhttptest.Request(t, ts, http.MethodPatch, topupBatch(batchOkStr, topupAmount), http.StatusAccepted,
-			jsonhttptest.WithRequestHeader("Gas-Price", "10000"),
+			jsonhttptest.WithRequestHeader(api.GasPriceHeader, "10000"),
 			jsonhttptest.WithExpectedJSONResponse(&api.PostageCreateResponse{
 				BatchID: batchOk,
 				TxHash:  txHash.String(),
@@ -631,7 +499,6 @@ func TestPostageTopUpStamp(t *testing.T) {
 			}),
 		)
 		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:        true,
 			PostageContract: contract,
 		})
 
@@ -652,7 +519,6 @@ func TestPostageTopUpStamp(t *testing.T) {
 			}),
 		)
 		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:        true,
 			PostageContract: contract,
 		})
 
@@ -676,12 +542,11 @@ func TestPostageTopUpStamp(t *testing.T) {
 			}),
 		)
 		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:        true,
 			PostageContract: contract,
 		})
 
 		jsonhttptest.Request(t, ts, http.MethodPatch, topupBatch(batchOkStr, topupAmount), http.StatusAccepted,
-			jsonhttptest.WithRequestHeader("Gas-Limit", "10000"),
+			jsonhttptest.WithRequestHeader(api.GasLimitHeader, "10000"),
 			jsonhttptest.WithExpectedJSONResponse(&api.PostageCreateResponse{
 				BatchID: batchOk,
 				TxHash:  txHash.String(),
@@ -714,7 +579,6 @@ func TestPostageDiluteStamp(t *testing.T) {
 			}),
 		)
 		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:        true,
 			PostageContract: contract,
 		})
 
@@ -744,12 +608,11 @@ func TestPostageDiluteStamp(t *testing.T) {
 			}),
 		)
 		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:        true,
 			PostageContract: contract,
 		})
 
 		jsonhttptest.Request(t, ts, http.MethodPatch, diluteBatch(batchOkStr, newBatchDepth), http.StatusAccepted,
-			jsonhttptest.WithRequestHeader("Gas-Price", "10000"),
+			jsonhttptest.WithRequestHeader(api.GasPriceHeader, "10000"),
 			jsonhttptest.WithExpectedJSONResponse(&api.PostageCreateResponse{
 				BatchID: batchOk,
 				TxHash:  txHash.String(),
@@ -766,7 +629,6 @@ func TestPostageDiluteStamp(t *testing.T) {
 			}),
 		)
 		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:        true,
 			PostageContract: contract,
 		})
 
@@ -787,7 +649,6 @@ func TestPostageDiluteStamp(t *testing.T) {
 			}),
 		)
 		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:        true,
 			PostageContract: contract,
 		})
 
@@ -811,18 +672,16 @@ func TestPostageDiluteStamp(t *testing.T) {
 			}),
 		)
 		ts, _, _, _ := newTestServer(t, testServerOptions{
-			DebugAPI:        true,
 			PostageContract: contract,
 		})
 
 		jsonhttptest.Request(t, ts, http.MethodPatch, diluteBatch(batchOkStr, newBatchDepth), http.StatusAccepted,
-			jsonhttptest.WithRequestHeader("Gas-Limit", "10000"),
+			jsonhttptest.WithRequestHeader(api.GasLimitHeader, "10000"),
 			jsonhttptest.WithExpectedJSONResponse(&api.PostageCreateResponse{
 				BatchID: batchOk,
 				TxHash:  txHash.String(),
 			}),
 		)
-
 	})
 }
 
@@ -845,7 +704,7 @@ func TestPostageAccessHandler(t *testing.T) {
 		{
 			name:     "create batch ok",
 			method:   http.MethodPost,
-			url:      "/stamps/1000/17?label=test",
+			url:      "/stamps/1000/24?label=test",
 			respCode: http.StatusCreated,
 			resp: &api.PostageCreateResponse{
 				BatchID: batchOk,
@@ -878,7 +737,7 @@ func TestPostageAccessHandler(t *testing.T) {
 		{
 			name:     "create batch not ok",
 			method:   http.MethodPost,
-			url:      "/stamps/1000/17?label=test",
+			url:      "/stamps/1000/24?label=test",
 			respCode: http.StatusTooManyRequests,
 			resp: &jsonhttp.StatusResponse{
 				Code:    http.StatusTooManyRequests,
@@ -909,8 +768,6 @@ func TestPostageAccessHandler(t *testing.T) {
 
 	for _, op1 := range success {
 		for _, op2 := range failure {
-			op1 := op1
-			op2 := op2
 			t.Run(op1.name+"-"+op2.name, func(t *testing.T) {
 				t.Parallel()
 
@@ -931,7 +788,6 @@ func TestPostageAccessHandler(t *testing.T) {
 				)
 
 				ts, _, _, _ := newTestServer(t, testServerOptions{
-					DebugAPI:        true,
 					PostageContract: contract,
 				})
 
@@ -956,7 +812,7 @@ func TestPostageAccessHandler(t *testing.T) {
 func Test_postageCreateHandler_invalidInputs(t *testing.T) {
 	t.Parallel()
 
-	client, _, _, _ := newTestServer(t, testServerOptions{DebugAPI: true})
+	client, _, _, _ := newTestServer(t, testServerOptions{})
 
 	tests := []struct {
 		name   string
@@ -1003,46 +859,10 @@ func Test_postageCreateHandler_invalidInputs(t *testing.T) {
 	}
 }
 
-func Test_postageGetStampsHandler_invalidInputs(t *testing.T) {
-	t.Parallel()
-
-	client, _, _, _ := newTestServer(t, testServerOptions{DebugAPI: true})
-
-	tests := []struct {
-		name string
-		all  string
-		want jsonhttp.StatusResponse
-	}{{
-		name: "all - invalid value",
-		all:  "123",
-		want: jsonhttp.StatusResponse{
-			Code:    http.StatusBadRequest,
-			Message: "invalid query params",
-			Reasons: []jsonhttp.Reason{
-				{
-					Field: "all",
-					Error: strconv.ErrSyntax.Error(),
-				},
-			},
-		},
-	}}
-
-	for _, tc := range tests {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			jsonhttptest.Request(t, client, http.MethodGet, "/stamps?all="+tc.all, tc.want.Code,
-				jsonhttptest.WithExpectedJSONResponse(tc.want),
-			)
-		})
-	}
-}
-
 func Test_postageGetStampBucketsHandler_invalidInputs(t *testing.T) {
 	t.Parallel()
 
-	client, _, _, _ := newTestServer(t, testServerOptions{DebugAPI: true})
+	client, _, _, _ := newTestServer(t, testServerOptions{})
 
 	tests := []struct {
 		name    string
@@ -1090,7 +910,6 @@ func Test_postageGetStampBucketsHandler_invalidInputs(t *testing.T) {
 	}}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -1104,7 +923,7 @@ func Test_postageGetStampBucketsHandler_invalidInputs(t *testing.T) {
 func Test_postageGetStampHandler_invalidInputs(t *testing.T) {
 	t.Parallel()
 
-	client, _, _, _ := newTestServer(t, testServerOptions{DebugAPI: true})
+	client, _, _, _ := newTestServer(t, testServerOptions{})
 
 	tests := []struct {
 		name    string
@@ -1152,7 +971,6 @@ func Test_postageGetStampHandler_invalidInputs(t *testing.T) {
 	}}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -1167,7 +985,7 @@ func Test_postageGetStampHandler_invalidInputs(t *testing.T) {
 func Test_postageTopUpHandler_invalidInputs(t *testing.T) {
 	t.Parallel()
 
-	client, _, _, _ := newTestServer(t, testServerOptions{DebugAPI: true})
+	client, _, _, _ := newTestServer(t, testServerOptions{})
 
 	tests := []struct {
 		name    string
@@ -1246,7 +1064,7 @@ func Test_postageTopUpHandler_invalidInputs(t *testing.T) {
 func Test_postageDiluteHandler_invalidInputs(t *testing.T) {
 	t.Parallel()
 
-	client, _, _, _ := newTestServer(t, testServerOptions{DebugAPI: true})
+	client, _, _, _ := newTestServer(t, testServerOptions{})
 
 	tests := []struct {
 		name    string

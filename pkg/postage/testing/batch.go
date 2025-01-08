@@ -12,7 +12,7 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/ethersphere/bee/pkg/postage"
+	"github.com/ethersphere/bee/v2/pkg/postage"
 )
 
 const (
@@ -120,8 +120,5 @@ func CompareBatches(t *testing.T, want, got *postage.Batch) {
 	}
 	if want.Depth != got.Depth {
 		t.Fatalf("depth: want %v, got %v", want.Depth, got.Depth)
-	}
-	if want.StorageRadius != got.StorageRadius {
-		t.Fatalf("storageRadius: want %v, got %v", want.StorageRadius, got.StorageRadius)
 	}
 }

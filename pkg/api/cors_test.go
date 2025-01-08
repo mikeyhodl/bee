@@ -9,7 +9,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/ethersphere/bee/pkg/jsonhttp/jsonhttptest"
+	"github.com/ethersphere/bee/v2/pkg/api"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp/jsonhttptest"
 )
 
 func TestCORSHeaders(t *testing.T) {
@@ -78,7 +79,6 @@ func TestCORSHeaders(t *testing.T) {
 			wantCORS:       false,
 		},
 	} {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -94,7 +94,7 @@ func TestCORSHeaders(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tc.origin != "" {
-				req.Header.Set("Origin", tc.origin)
+				req.Header.Set(api.OriginHeader, tc.origin)
 			}
 
 			r, err := client.Do(req)
@@ -115,7 +115,6 @@ func TestCORSHeaders(t *testing.T) {
 			}
 		})
 	}
-
 }
 
 // TestCors tests whether CORs work correctly with OPTIONS method
@@ -134,9 +133,10 @@ func TestCors(t *testing.T) {
 		{
 			endpoint:        "bzz",
 			expectedMethods: "POST",
-		}, {
+		},
+		{
 			endpoint:        "bzz/0101011",
-			expectedMethods: "GET",
+			expectedMethods: "GET, HEAD",
 		},
 		{
 			endpoint:        "chunks",
@@ -144,7 +144,7 @@ func TestCors(t *testing.T) {
 		},
 		{
 			endpoint:        "chunks/123213",
-			expectedMethods: "DELETE, GET, HEAD",
+			expectedMethods: "GET, HEAD",
 		},
 		{
 			endpoint:        "bytes",
@@ -155,7 +155,6 @@ func TestCors(t *testing.T) {
 			expectedMethods: "GET, HEAD",
 		},
 	} {
-		tc := tc
 		t.Run(tc.endpoint, func(t *testing.T) {
 			t.Parallel()
 
@@ -163,14 +162,10 @@ func TestCors(t *testing.T) {
 				CORSAllowedOrigins: []string{origin},
 			})
 
-			r := jsonhttptest.Request(t, client, http.MethodOptions, "/"+tc.endpoint, http.StatusNoContent,
-				jsonhttptest.WithRequestHeader("Origin", origin))
-
-			allowedMethods := r.Get("Access-Control-Allow-Methods")
-
-			if allowedMethods != tc.expectedMethods {
-				t.Fatalf("expects %s and got %s", tc.expectedMethods, allowedMethods)
-			}
+			jsonhttptest.Request(t, client, http.MethodOptions, "/"+tc.endpoint, http.StatusNoContent,
+				jsonhttptest.WithRequestHeader(api.OriginHeader, origin),
+				jsonhttptest.WithExpectedResponseHeader("Access-Control-Allow-Methods", tc.expectedMethods),
+			)
 		})
 	}
 }
@@ -202,7 +197,7 @@ func TestCorsStatus(t *testing.T) {
 		{
 			endpoint:          "chunks/0101011",
 			notAllowedMethods: http.MethodPost,
-			allowedMethods:    "DELETE, GET, HEAD",
+			allowedMethods:    "GET, HEAD",
 		},
 		{
 			endpoint:          "bytes",
@@ -215,7 +210,6 @@ func TestCorsStatus(t *testing.T) {
 			allowedMethods:    "GET, HEAD",
 		},
 	} {
-		tc := tc
 		t.Run(tc.endpoint, func(t *testing.T) {
 			t.Parallel()
 
@@ -223,13 +217,10 @@ func TestCorsStatus(t *testing.T) {
 				CORSAllowedOrigins: []string{origin},
 			})
 
-			r := jsonhttptest.Request(t, client, tc.notAllowedMethods, "/"+tc.endpoint, http.StatusMethodNotAllowed,
-				jsonhttptest.WithRequestHeader("Origin", origin))
-
-			allowedMethods := r.Get("Access-Control-Allow-Methods")
-			if allowedMethods != tc.allowedMethods {
-				t.Fatalf("expects %s and got %s", tc.notAllowedMethods, allowedMethods)
-			}
+			jsonhttptest.Request(t, client, tc.notAllowedMethods, "/"+tc.endpoint, http.StatusMethodNotAllowed,
+				jsonhttptest.WithRequestHeader(api.OriginHeader, origin),
+				jsonhttptest.WithExpectedResponseHeader("Access-Control-Allow-Methods", tc.allowedMethods),
+			)
 		})
 	}
 }

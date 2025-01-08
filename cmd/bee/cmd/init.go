@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ethersphere/bee/pkg/node"
+	"github.com/ethersphere/bee/v2/pkg/node"
 	"github.com/spf13/cobra"
 )
 
@@ -32,7 +32,7 @@ func (c *command) initInitCmd() (err error) {
 			}
 
 			dataDir := c.config.GetString(optionNameDataDir)
-			stateStore, err := node.InitStateStore(logger, dataDir)
+			stateStore, _, err := node.InitStateStore(logger, dataDir, 1000)
 			if err != nil {
 				return err
 			}

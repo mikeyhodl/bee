@@ -11,7 +11,6 @@ import (
 	"crypto/ecdsa"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,45 +26,43 @@ import (
 	"unicode/utf8"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethersphere/bee/pkg/accounting"
-	"github.com/ethersphere/bee/pkg/auth"
-	"github.com/ethersphere/bee/pkg/crypto"
-	"github.com/ethersphere/bee/pkg/feeds"
-	"github.com/ethersphere/bee/pkg/file/pipeline"
-	"github.com/ethersphere/bee/pkg/file/pipeline/builder"
-	"github.com/ethersphere/bee/pkg/jsonhttp"
-	"github.com/ethersphere/bee/pkg/log"
-	"github.com/ethersphere/bee/pkg/p2p"
-	"github.com/ethersphere/bee/pkg/pingpong"
-	"github.com/ethersphere/bee/pkg/pinning"
-	"github.com/ethersphere/bee/pkg/postage"
-	"github.com/ethersphere/bee/pkg/postage/postagecontract"
-	"github.com/ethersphere/bee/pkg/pss"
-	"github.com/ethersphere/bee/pkg/pusher"
-	"github.com/ethersphere/bee/pkg/resolver"
-	"github.com/ethersphere/bee/pkg/resolver/client/ens"
-	"github.com/ethersphere/bee/pkg/sctx"
-	"github.com/ethersphere/bee/pkg/settlement"
-	"github.com/ethersphere/bee/pkg/settlement/swap"
-	"github.com/ethersphere/bee/pkg/settlement/swap/chequebook"
-	"github.com/ethersphere/bee/pkg/settlement/swap/erc20"
-	"github.com/ethersphere/bee/pkg/status"
-	"github.com/ethersphere/bee/pkg/steward"
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/ethersphere/bee/pkg/storageincentives"
-	"github.com/ethersphere/bee/pkg/storageincentives/staking"
-	"github.com/ethersphere/bee/pkg/swarm"
-	"github.com/ethersphere/bee/pkg/tags"
-	"github.com/ethersphere/bee/pkg/topology"
-	"github.com/ethersphere/bee/pkg/topology/lightnode"
-	"github.com/ethersphere/bee/pkg/tracing"
-	"github.com/ethersphere/bee/pkg/transaction"
-	"github.com/ethersphere/bee/pkg/traversal"
+	"github.com/ethersphere/bee/v2/pkg/accesscontrol"
+	"github.com/ethersphere/bee/v2/pkg/accounting"
+	"github.com/ethersphere/bee/v2/pkg/crypto"
+	"github.com/ethersphere/bee/v2/pkg/feeds"
+	"github.com/ethersphere/bee/v2/pkg/file/pipeline"
+	"github.com/ethersphere/bee/v2/pkg/file/pipeline/builder"
+	"github.com/ethersphere/bee/v2/pkg/file/redundancy"
+	"github.com/ethersphere/bee/v2/pkg/gsoc"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/p2p"
+	"github.com/ethersphere/bee/v2/pkg/pingpong"
+	"github.com/ethersphere/bee/v2/pkg/postage"
+	"github.com/ethersphere/bee/v2/pkg/postage/postagecontract"
+	"github.com/ethersphere/bee/v2/pkg/pss"
+	"github.com/ethersphere/bee/v2/pkg/resolver"
+	"github.com/ethersphere/bee/v2/pkg/resolver/client/ens"
+	"github.com/ethersphere/bee/v2/pkg/sctx"
+	"github.com/ethersphere/bee/v2/pkg/settlement"
+	"github.com/ethersphere/bee/v2/pkg/settlement/swap"
+	"github.com/ethersphere/bee/v2/pkg/settlement/swap/chequebook"
+	"github.com/ethersphere/bee/v2/pkg/settlement/swap/erc20"
+	"github.com/ethersphere/bee/v2/pkg/status"
+	"github.com/ethersphere/bee/v2/pkg/steward"
+	storage "github.com/ethersphere/bee/v2/pkg/storage"
+	"github.com/ethersphere/bee/v2/pkg/storageincentives"
+	"github.com/ethersphere/bee/v2/pkg/storageincentives/staking"
+	storer "github.com/ethersphere/bee/v2/pkg/storer"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/topology"
+	"github.com/ethersphere/bee/v2/pkg/topology/lightnode"
+	"github.com/ethersphere/bee/v2/pkg/tracing"
+	"github.com/ethersphere/bee/v2/pkg/transaction"
 	"github.com/go-playground/validator/v10"
 	"github.com/gorilla/mux"
 	"github.com/hashicorp/go-multierror"
 	"github.com/prometheus/client_golang/prometheus"
-	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -73,34 +70,44 @@ import (
 const loggerName = "api"
 
 const (
-	SwarmPinHeader            = "Swarm-Pin"
-	SwarmTagHeader            = "Swarm-Tag"
-	SwarmEncryptHeader        = "Swarm-Encrypt"
-	SwarmIndexDocumentHeader  = "Swarm-Index-Document"
-	SwarmErrorDocumentHeader  = "Swarm-Error-Document"
-	SwarmFeedIndexHeader      = "Swarm-Feed-Index"
-	SwarmFeedIndexNextHeader  = "Swarm-Feed-Index-Next"
-	SwarmCollectionHeader     = "Swarm-Collection"
-	SwarmPostageBatchIdHeader = "Swarm-Postage-Batch-Id"
-	SwarmDeferredUploadHeader = "Swarm-Deferred-Upload"
+	SwarmPinHeader                    = "Swarm-Pin"
+	SwarmTagHeader                    = "Swarm-Tag"
+	SwarmEncryptHeader                = "Swarm-Encrypt"
+	SwarmIndexDocumentHeader          = "Swarm-Index-Document"
+	SwarmErrorDocumentHeader          = "Swarm-Error-Document"
+	SwarmSocSignatureHeader           = "Swarm-Soc-Signature"
+	SwarmFeedIndexHeader              = "Swarm-Feed-Index"
+	SwarmFeedIndexNextHeader          = "Swarm-Feed-Index-Next"
+	SwarmOnlyRootChunk                = "Swarm-Only-Root-Chunk"
+	SwarmCollectionHeader             = "Swarm-Collection"
+	SwarmPostageBatchIdHeader         = "Swarm-Postage-Batch-Id"
+	SwarmPostageStampHeader           = "Swarm-Postage-Stamp"
+	SwarmDeferredUploadHeader         = "Swarm-Deferred-Upload"
+	SwarmRedundancyLevelHeader        = "Swarm-Redundancy-Level"
+	SwarmRedundancyStrategyHeader     = "Swarm-Redundancy-Strategy"
+	SwarmRedundancyFallbackModeHeader = "Swarm-Redundancy-Fallback-Mode"
+	SwarmChunkRetrievalTimeoutHeader  = "Swarm-Chunk-Retrieval-Timeout"
+	SwarmLookAheadBufferSizeHeader    = "Swarm-Lookahead-Buffer-Size"
+	SwarmActHeader                    = "Swarm-Act"
+	SwarmActTimestampHeader           = "Swarm-Act-Timestamp"
+	SwarmActPublisherHeader           = "Swarm-Act-Publisher"
+	SwarmActHistoryAddressHeader      = "Swarm-Act-History-Address"
+
+	ImmutableHeader = "Immutable"
+	GasPriceHeader  = "Gas-Price"
+	GasLimitHeader  = "Gas-Limit"
+	ETagHeader      = "ETag"
+
+	AuthorizationHeader      = "Authorization"
+	AcceptEncodingHeader     = "Accept-Encoding"
+	ContentTypeHeader        = "Content-Type"
+	ContentDispositionHeader = "Content-Disposition"
+	ContentLengthHeader      = "Content-Length"
+	RangeHeader              = "Range"
+	OriginHeader             = "Origin"
 )
 
-// The size of buffer used for prefetching content with Langos.
-// Warning: This value influences the number of chunk requests and chunker join goroutines
-// per file request.
-// Recommended value is 8 or 16 times the io.Copy default buffer value which is 32kB, depending
-// on the file size. Use lookaheadBufferSize() to get the correct buffer size for the request.
 const (
-	smallFileBufferSize = 8 * 32 * 1024
-	largeFileBufferSize = 16 * 32 * 1024
-
-	largeBufferFilesizeThreshold = 10 * 1000000 // ten megs
-
-	uploadSem = 50
-)
-
-const (
-	contentTypeHeader  = "Content-Type"
 	multiPartFormData  = "multipart/form-data"
 	contentTypeTar     = "application/x-tar"
 	boolHeaderSetValue = "true"
@@ -117,16 +124,35 @@ var (
 	errBatchUnusable                    = errors.New("batch not usable")
 	errUnsupportedDevNodeOperation      = errors.New("operation not supported in dev mode")
 	errOperationSupportedOnlyInFullMode = errors.New("operation is supported only in full mode")
+	errActDownload                      = errors.New("act download failed")
+	errActUpload                        = errors.New("act upload failed")
+	errActGranteeList                   = errors.New("failed to create or update grantee list")
+
+	batchIdOrStampSig = fmt.Sprintf("Either '%s' or '%s' header must be set in the request", SwarmPostageStampHeader, SwarmPostageBatchIdHeader)
 )
 
+// Storer interface provides the functionality required from the local storage
+// component of the node.
+type Storer interface {
+	storer.UploadStore
+	storer.PinStore
+	storer.CacheStore
+	storer.NetStore
+	storer.LocalStore
+	storer.RadiusChecker
+	storer.Debugger
+	storer.NeighborhoodStats
+}
+
+type PinIntegrity interface {
+	Check(ctx context.Context, logger log.Logger, pin string, out chan storer.PinStat)
+}
+
 type Service struct {
-	auth            auth.Authenticator
-	tags            *tags.Tags
-	storer          storage.Storer
+	storer          Storer
 	resolver        resolver.Interface
 	pss             pss.Interface
-	traversal       traversal.Traverser
-	pinning         pinning.Interface
+	gsoc            gsoc.Listener
 	steward         steward.Interface
 	logger          log.Logger
 	loggerV1        log.Logger
@@ -134,12 +160,11 @@ type Service struct {
 	feedFactory     feeds.Factory
 	signer          crypto.Signer
 	post            postage.Service
+	accesscontrol   accesscontrol.Controller
 	postageContract postagecontract.Interface
-	chunkPushC      chan *pusher.Op
 	probe           *Probe
 	metricsRegistry *prometheus.Registry
 	stakingContract staking.Contract
-	indexDebugger   StorageIndexDebugger
 	Options
 
 	http.Handler
@@ -150,13 +175,13 @@ type Service struct {
 	wsWg sync.WaitGroup // wait for all websockets to close on exit
 	quit chan struct{}
 
-	// from debug API
 	overlay           *swarm.Address
 	publicKey         ecdsa.PublicKey
 	pssPublicKey      ecdsa.PublicKey
 	ethereumAddress   common.Address
 	chequebookEnabled bool
 	swapEnabled       bool
+	fullAPIEnabled    bool
 
 	topologyDriver topology.Driver
 	p2p            p2p.DebugService
@@ -165,7 +190,10 @@ type Service struct {
 	pseudosettle   settlement.Interface
 	pingpong       pingpong.Interface
 
-	batchStore postage.Storer
+	batchStore   postage.Storer
+	stamperStore storage.Store
+	pinIntegrity PinIntegrity
+
 	syncStatus func() (bool, error)
 
 	swap        swap.Interface
@@ -182,6 +210,8 @@ type Service struct {
 	chainBackend transaction.Backend
 	erc20Service erc20.Service
 	chainID      int64
+
+	whitelistedWithdrawalAddress []common.Address
 
 	preMapHooks map[string]func(v string) (string, error)
 	validate    *validator.Validate
@@ -212,35 +242,46 @@ func (s *Service) SetRedistributionAgent(redistributionAgent *storageincentives.
 type Options struct {
 	CORSAllowedOrigins []string
 	WsPingPeriod       time.Duration
-	Restricted         bool
 }
 
 type ExtraOptions struct {
-	Pingpong         pingpong.Interface
-	TopologyDriver   topology.Driver
-	LightNodes       *lightnode.Container
-	Accounting       accounting.Interface
-	Pseudosettle     settlement.Interface
-	Swap             swap.Interface
-	Chequebook       chequebook.Service
-	BlockTime        time.Duration
-	Tags             *tags.Tags
-	Storer           storage.Storer
-	Resolver         resolver.Interface
-	Pss              pss.Interface
-	TraversalService traversal.Traverser
-	Pinning          pinning.Interface
-	FeedFactory      feeds.Factory
-	Post             postage.Service
-	PostageContract  postagecontract.Interface
-	Staking          staking.Contract
-	Steward          steward.Interface
-	SyncStatus       func() (bool, error)
-	IndexDebugger    StorageIndexDebugger
-	NodeStatus       *status.Service
+	Pingpong        pingpong.Interface
+	TopologyDriver  topology.Driver
+	LightNodes      *lightnode.Container
+	Accounting      accounting.Interface
+	Pseudosettle    settlement.Interface
+	Swap            swap.Interface
+	Chequebook      chequebook.Service
+	BlockTime       time.Duration
+	Storer          Storer
+	Resolver        resolver.Interface
+	Pss             pss.Interface
+	Gsoc            gsoc.Listener
+	FeedFactory     feeds.Factory
+	Post            postage.Service
+	AccessControl   accesscontrol.Controller
+	PostageContract postagecontract.Interface
+	Staking         staking.Contract
+	Steward         steward.Interface
+	SyncStatus      func() (bool, error)
+	NodeStatus      *status.Service
+	PinIntegrity    PinIntegrity
 }
 
-func New(publicKey, pssPublicKey ecdsa.PublicKey, ethereumAddress common.Address, logger log.Logger, transaction transaction.Service, batchStore postage.Storer, beeMode BeeNodeMode, chequebookEnabled, swapEnabled bool, chainBackend transaction.Backend, cors []string) *Service {
+func New(
+	publicKey, pssPublicKey ecdsa.PublicKey,
+	ethereumAddress common.Address,
+	whitelistedWithdrawalAddress []string,
+	logger log.Logger,
+	transaction transaction.Service,
+	batchStore postage.Storer,
+	beeMode BeeNodeMode,
+	chequebookEnabled bool,
+	swapEnabled bool,
+	chainBackend transaction.Backend,
+	cors []string,
+	stamperStore storage.Store,
+) *Service {
 	s := new(Service)
 
 	s.CORSAllowedOrigins = cors
@@ -265,6 +306,10 @@ func New(publicKey, pssPublicKey ecdsa.PublicKey, ethereumAddress common.Address
 			buf, err := base64.URLEncoding.DecodeString(v)
 			return string(buf), err
 		},
+		"decHex": func(v string) (string, error) {
+			buf, err := hex.DecodeString(v)
+			return string(buf), err
+		},
 	}
 	s.validate = validator.New()
 	s.validate.RegisterTagNameFunc(func(fld reflect.StructField) string {
@@ -274,13 +319,17 @@ func New(publicKey, pssPublicKey ecdsa.PublicKey, ethereumAddress common.Address
 		}
 		return name
 	})
+	s.stamperStore = stamperStore
+
+	for _, v := range whitelistedWithdrawalAddress {
+		s.whitelistedWithdrawalAddress = append(s.whitelistedWithdrawalAddress, common.HexToAddress(v))
+	}
+
 	return s
 }
 
 // Configure will create a and initialize a new API service.
-func (s *Service) Configure(signer crypto.Signer, auth auth.Authenticator, tracer *tracing.Tracer, o Options, e ExtraOptions, chainID int64, erc20 erc20.Service) <-chan *pusher.Op {
-	s.auth = auth
-	s.chunkPushC = make(chan *pusher.Op)
+func (s *Service) Configure(signer crypto.Signer, tracer *tracing.Tracer, o Options, e ExtraOptions, chainID int64, erc20 erc20.Service) {
 	s.signer = signer
 	s.Options = o
 	s.tracer = tracer
@@ -288,18 +337,16 @@ func (s *Service) Configure(signer crypto.Signer, auth auth.Authenticator, trace
 
 	s.quit = make(chan struct{})
 
-	s.tags = e.Tags
 	s.storer = e.Storer
 	s.resolver = e.Resolver
 	s.pss = e.Pss
-	s.traversal = e.TraversalService
-	s.pinning = e.Pinning
+	s.gsoc = e.Gsoc
 	s.feedFactory = e.FeedFactory
 	s.post = e.Post
+	s.accesscontrol = e.AccessControl
 	s.postageContract = e.PostageContract
 	s.steward = e.Steward
 	s.stakingContract = e.Staking
-	s.indexDebugger = e.IndexDebugger
 
 	s.pingpong = e.Pingpong
 	s.topologyDriver = e.TopologyDriver
@@ -332,7 +379,7 @@ func (s *Service) Configure(signer crypto.Signer, auth auth.Authenticator, trace
 		}
 	}
 
-	return s.chunkPushC
+	s.pinIntegrity = e.PinIntegrity
 }
 
 func (s *Service) SetProbe(probe *Probe) {
@@ -359,27 +406,20 @@ func (s *Service) Close() error {
 	return nil
 }
 
-// getOrCreateTag attempts to get the tag if an id is supplied, and returns an error if it does not exist.
-// If no id is supplied, it will attempt to create a new tag with a generated name and return it.
-func (s *Service) getOrCreateTag(tagUid string) (*tags.Tag, bool, error) {
+// getOrCreateSessionID attempts to get the session if an tag id is supplied, and returns an error
+// if it does not exist. If no id is supplied, it will attempt to create a new session and return it.
+func (s *Service) getOrCreateSessionID(tagUid uint64) (uint64, error) {
+	var (
+		tag storer.SessionInfo
+		err error
+	)
 	// if tag ID is not supplied, create a new tag
-	if tagUid == "" {
-		tag, err := s.tags.Create(0)
-		if err != nil {
-			return nil, false, fmt.Errorf("cannot create tag: %w", err)
-		}
-		return tag, true, nil
+	if tagUid == 0 {
+		tag, err = s.storer.NewSession()
+	} else {
+		tag, err = s.storer.Session(tagUid)
 	}
-	t, err := s.getTag(tagUid)
-	return t, false, err
-}
-
-func (s *Service) getTag(tagUid string) (*tags.Tag, error) {
-	uid, err := strconv.Atoi(tagUid)
-	if err != nil {
-		return nil, fmt.Errorf("cannot mapStructure taguid: %w", err)
-	}
-	return s.tags.Get(uint32(uid))
+	return tag.TagID, err
 }
 
 func (s *Service) resolveNameOrAddress(str string) (swarm.Address, error) {
@@ -404,157 +444,6 @@ func (s *Service) resolveNameOrAddress(str string) (swarm.Address, error) {
 	}
 
 	return swarm.ZeroAddress, fmt.Errorf("%w: %w", errInvalidNameOrAddress, err)
-}
-
-// requestModePut returns the desired storage.ModePut for this request based on the request headers.
-func requestModePut(r *http.Request) storage.ModePut {
-	if requestPin(r) {
-		return storage.ModePutUploadPin
-	}
-	return storage.ModePutUpload
-}
-
-func requestPin(r *http.Request) bool {
-	return strings.ToLower(r.Header.Get(SwarmPinHeader)) == boolHeaderSetValue
-}
-
-func requestEncrypt(r *http.Request) bool {
-	return strings.ToLower(r.Header.Get(SwarmEncryptHeader)) == boolHeaderSetValue
-}
-
-func requestDeferred(r *http.Request) (bool, error) {
-	if h := strings.ToLower(r.Header.Get(SwarmDeferredUploadHeader)); h != "" {
-		return strconv.ParseBool(h)
-	}
-	return true, nil
-}
-
-func requestPostageBatchId(r *http.Request) ([]byte, error) {
-	if h := strings.ToLower(r.Header.Get(SwarmPostageBatchIdHeader)); h != "" {
-		if len(h) != 64 {
-			return nil, errInvalidPostageBatch
-		}
-		b, err := hex.DecodeString(h)
-		if err != nil {
-			return nil, errInvalidPostageBatch
-		}
-		return b, nil
-	}
-
-	return nil, errInvalidPostageBatch
-}
-
-type securityTokenRsp struct {
-	Key string `json:"key"`
-}
-
-type securityTokenReq struct {
-	Role   string `json:"role"`
-	Expiry int    `json:"expiry"` // duration in seconds
-}
-
-func (s *Service) authHandler(w http.ResponseWriter, r *http.Request) {
-	_, pass, ok := r.BasicAuth()
-
-	if !ok {
-		s.logger.Error(nil, "auth handler: missing basic auth")
-		w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
-		jsonhttp.Unauthorized(w, "Unauthorized")
-		return
-	}
-
-	if !s.auth.Authorize(pass) {
-		s.logger.Error(nil, "auth handler: unauthorized")
-		w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
-		jsonhttp.Unauthorized(w, "Unauthorized")
-		return
-	}
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		s.logger.Debug("auth handler: read request body failed", "error", err)
-		s.logger.Error(nil, "auth handler: read request body failed")
-		jsonhttp.BadRequest(w, "Read request body")
-		return
-	}
-
-	var payload securityTokenReq
-	if err = json.Unmarshal(body, &payload); err != nil {
-		s.logger.Debug("auth handler: unmarshal request body failed", "error", err)
-		s.logger.Error(nil, "auth handler: unmarshal request body failed")
-		jsonhttp.BadRequest(w, "Unmarshal json body")
-		return
-	}
-
-	key, err := s.auth.GenerateKey(payload.Role, time.Duration(payload.Expiry)*time.Second)
-	if errors.Is(err, auth.ErrExpiry) {
-		s.logger.Debug("auth handler: generate key failed", "error", err)
-		s.logger.Error(nil, "auth handler: generate key failed")
-		jsonhttp.BadRequest(w, "Expiry duration must be a positive number")
-		return
-	}
-	if err != nil {
-		s.logger.Debug("auth handler: add auth token failed", "error", err)
-		s.logger.Error(nil, "auth handler: add auth token failed")
-		jsonhttp.InternalServerError(w, "Error generating authorization token")
-		return
-	}
-
-	jsonhttp.Created(w, securityTokenRsp{
-		Key: key,
-	})
-}
-
-func (s *Service) refreshHandler(w http.ResponseWriter, r *http.Request) {
-	reqToken := r.Header.Get("Authorization")
-	if !strings.HasPrefix(reqToken, "Bearer ") {
-		jsonhttp.Forbidden(w, "Missing bearer token")
-		return
-	}
-
-	keys := strings.Split(reqToken, "Bearer ")
-
-	if len(keys) != 2 || strings.Trim(keys[1], " ") == "" {
-		jsonhttp.Forbidden(w, "Missing security token")
-		return
-	}
-
-	authToken := keys[1]
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		s.logger.Debug("auth handler: read request body failed", "error", err)
-		s.logger.Error(nil, "auth handler: read request body failed")
-		jsonhttp.BadRequest(w, "Read request body")
-		return
-	}
-
-	var payload securityTokenReq
-	if err = json.Unmarshal(body, &payload); err != nil {
-		s.logger.Debug("auth handler: unmarshal request body failed", "error", err)
-		s.logger.Error(nil, "auth handler: unmarshal request body failed")
-		jsonhttp.BadRequest(w, "Unmarshal json body")
-		return
-	}
-
-	key, err := s.auth.RefreshKey(authToken, time.Duration(payload.Expiry)*time.Second)
-	if errors.Is(err, auth.ErrTokenExpired) {
-		s.logger.Debug("auth handler: refresh key failed", "error", err)
-		s.logger.Error(nil, "auth handler: refresh key failed")
-		jsonhttp.BadRequest(w, "Token expired")
-		return
-	}
-
-	if err != nil {
-		s.logger.Debug("auth handler: refresh token failed", "error", err)
-		s.logger.Error(nil, "auth handler: refresh token failed")
-		jsonhttp.InternalServerError(w, "Error refreshing authorization token")
-		return
-	}
-
-	jsonhttp.Created(w, securityTokenRsp{
-		Key: key,
-	})
 }
 
 func (s *Service) newTracingHandler(spanName string) func(h http.Handler) http.Handler {
@@ -587,7 +476,7 @@ func (s *Service) contentLengthMetricMiddleware() func(h http.Handler) http.Hand
 			h.ServeHTTP(w, r)
 			switch r.Method {
 			case http.MethodGet:
-				hdr := w.Header().Get("Content-Length")
+				hdr := w.Header().Get(ContentLengthHeader)
 				if hdr == "" {
 					s.logger.Debug("content length header not found")
 					return
@@ -634,20 +523,20 @@ func (s *Service) gasConfigMiddleware(handlerName string) func(h http.Handler) h
 	}
 }
 
-func lookaheadBufferSize(size int64) int {
-	if size <= largeBufferFilesizeThreshold {
-		return smallFileBufferSize
-	}
-	return largeFileBufferSize
-}
-
 // corsHandler sets CORS headers to HTTP response if allowed origins are configured.
 func (s *Service) corsHandler(h http.Handler) http.Handler {
+	allowedHeaders := []string{
+		"User-Agent", "Accept", "X-Requested-With", "Access-Control-Request-Headers", "Access-Control-Request-Method", "Accept-Ranges", "Content-Encoding",
+		AuthorizationHeader, AcceptEncodingHeader, ContentTypeHeader, ContentDispositionHeader, RangeHeader, OriginHeader,
+		SwarmTagHeader, SwarmPinHeader, SwarmEncryptHeader, SwarmIndexDocumentHeader, SwarmErrorDocumentHeader, SwarmCollectionHeader, SwarmPostageBatchIdHeader, SwarmPostageStampHeader, SwarmDeferredUploadHeader, SwarmRedundancyLevelHeader, SwarmRedundancyStrategyHeader, SwarmRedundancyFallbackModeHeader, SwarmChunkRetrievalTimeoutHeader, SwarmLookAheadBufferSizeHeader, SwarmFeedIndexHeader, SwarmFeedIndexNextHeader, SwarmSocSignatureHeader, SwarmOnlyRootChunk, GasPriceHeader, GasLimitHeader, ImmutableHeader,
+	}
+	allowedHeadersStr := strings.Join(allowedHeaders, ", ")
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if o := r.Header.Get("Origin"); o != "" && s.checkOrigin(r) {
+		if o := r.Header.Get(OriginHeader); o != "" && s.checkOrigin(r) {
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Access-Control-Allow-Origin", o)
-			w.Header().Set("Access-Control-Allow-Headers", "User-Agent, Origin, Accept, Authorization, Content-Type, X-Requested-With, Decompressed-Content-Length, Access-Control-Request-Headers, Access-Control-Request-Method, Swarm-Tag, Swarm-Pin, Swarm-Encrypt, Swarm-Index-Document, Swarm-Error-Document, Swarm-Collection, Swarm-Postage-Batch-Id, Swarm-Deferred-Upload, Gas-Price, Range, Accept-Ranges, Content-Encoding")
+			w.Header().Set("Access-Control-Allow-Headers", allowedHeadersStr)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS, POST, PUT, DELETE")
 			w.Header().Set("Access-Control-Max-Age", "3600")
 		}
@@ -657,7 +546,7 @@ func (s *Service) corsHandler(h http.Handler) http.Handler {
 
 // checkOrigin returns true if the origin is not set or is equal to the request host.
 func (s *Service) checkOrigin(r *http.Request) bool {
-	origin := r.Header["Origin"]
+	origin := r.Header[OriginHeader]
 	if len(origin) == 0 {
 		return true
 	}
@@ -783,188 +672,150 @@ func equalASCIIFold(s, t string) bool {
 	return s == t
 }
 
-// newStamperPutter returns either a storingStamperPutter or a pushStamperPutter
-// according to whether the upload is a deferred upload or not. in the case of
-// direct push to the network (default) a pushStamperPutter is returned.
-// returns a function to wait on the errorgroup in case of a pushing stamper putter.
-func (s *Service) newStamperPutter(r *http.Request) (storage.Storer, func() error, error) {
-	batch, err := requestPostageBatchId(r) // TODO: extrapolate the headers parsing to the handler level!
+type putterOptions struct {
+	BatchID  []byte
+	TagID    uint64
+	Deferred bool
+	Pin      bool
+}
+
+type putterSessionWrapper struct {
+	storer.PutterSession
+	stamper postage.Stamper
+	save    func() error
+}
+
+func (p *putterSessionWrapper) Put(ctx context.Context, chunk swarm.Chunk) error {
+	idAddress, err := storage.IdentityAddress(chunk)
 	if err != nil {
-		return nil, noopWaitFn, fmt.Errorf("postage batch id: %w", err)
+		return err
 	}
 
-	deferred, err := requestDeferred(r) // TODO: extrapolate the headers parsing to the handler level!
+	stamp, err := p.stamper.Stamp(chunk.Address(), idAddress)
 	if err != nil {
-		return nil, noopWaitFn, fmt.Errorf("request deferred: %w", err)
+		return err
+	}
+	return p.PutterSession.Put(ctx, chunk.WithStamp(stamp))
+}
+
+func (p *putterSessionWrapper) Done(ref swarm.Address) error {
+	return errors.Join(p.PutterSession.Done(ref), p.save())
+}
+
+func (p *putterSessionWrapper) Cleanup() error {
+	return errors.Join(p.PutterSession.Cleanup(), p.save())
+}
+
+func (s *Service) getStamper(batchID []byte) (postage.Stamper, func() error, error) {
+	exists, err := s.batchStore.Exists(batchID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("batch exists: %w", err)
 	}
 
-	if !deferred && s.beeMode == DevMode {
-		return nil, noopWaitFn, errUnsupportedDevNodeOperation
-	}
-	exists, err := s.batchStore.Exists(batch)
+	issuer, save, err := s.post.GetStampIssuer(batchID)
 	if err != nil {
-		return nil, noopWaitFn, fmt.Errorf("batch exists: %w", err)
-	}
-
-	issuer, save, err := s.post.GetStampIssuer(batch)
-	if err != nil {
-		return nil, noopWaitFn, fmt.Errorf("stamp issuer: %w", err)
+		return nil, nil, fmt.Errorf("stamp issuer: %w", err)
 	}
 
 	if usable := exists && s.post.IssuerUsable(issuer); !usable {
-		return nil, noopWaitFn, errBatchUnusable
+		return nil, nil, errBatchUnusable
 	}
 
-	if deferred {
-		p := newStoringStamperPutter(s.storer, issuer, s.signer)
-		return p, save, nil
-	}
-	p := newPushStamperPutter(s.storer, issuer, s.signer, s.chunkPushC)
+	return postage.NewStamper(s.stamperStore, issuer, s.signer), save, nil
+}
 
-	wait := func() error {
-		if err := save(); err != nil {
-			return err
-		}
-		return p.Wait()
+func (s *Service) newStamperPutter(ctx context.Context, opts putterOptions) (storer.PutterSession, error) {
+	if !opts.Deferred && s.beeMode == DevMode {
+		return nil, errUnsupportedDevNodeOperation
 	}
 
-	return p, wait, err
-}
-
-type pushStamperPutter struct {
-	storage.Storer
-	stamper postage.Stamper
-	eg      errgroup.Group
-	c       chan *pusher.Op
-	sem     chan struct{}
-}
-
-func newPushStamperPutter(s storage.Storer, i *postage.StampIssuer, signer crypto.Signer, cc chan *pusher.Op) *pushStamperPutter {
-	stamper := postage.NewStamper(i, signer)
-	return &pushStamperPutter{Storer: s, stamper: stamper, c: cc, sem: make(chan struct{}, uploadSem)}
-}
-
-func (p *pushStamperPutter) Wait() error {
-	return p.eg.Wait()
-}
-
-func (p *pushStamperPutter) Put(ctx context.Context, mode storage.ModePut, chs ...swarm.Chunk) (exists []bool, err error) {
-	exists = make([]bool, len(chs))
-
-	for i, c := range chs {
-		// skips chunk we already know about
-		has, err := p.Storer.Has(ctx, c.Address())
-		if err != nil {
-			return nil, err
-		}
-		if has || swarm.ContainsChunkWithAddress(chs[:i], c.Address()) {
-			exists[i] = true
-			continue
-		}
-		stamp, err := p.stamper.Stamp(c.Address())
-		if err != nil {
-			return nil, err
-		}
-
-		p.putChunk(ctx, c.WithStamp(stamp))
-	}
-	return exists, nil
-}
-
-func (p *pushStamperPutter) putChunk(ctx context.Context, ch swarm.Chunk) {
-	p.sem <- struct{}{}
-	p.eg.Go(func() error {
-		defer func() {
-			<-p.sem
-		}()
-
-		for {
-			errc := make(chan error, 1)
-			p.c <- &pusher.Op{Chunk: ch, Err: errc, Direct: true}
-
-			select {
-			case err := <-errc:
-				// if we're the closest one we will store the chunk
-				if errors.Is(err, topology.ErrWantSelf) {
-					_, err := p.Storer.Put(ctx, storage.ModePutSync, ch)
-					return err
-				}
-				if err == nil {
-					return nil
-				}
-
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-	})
-}
-
-type stamperPutter struct {
-	storage.Storer
-	stamper postage.Stamper
-}
-
-func newStoringStamperPutter(s storage.Storer, i *postage.StampIssuer, signer crypto.Signer) *stamperPutter {
-	stamper := postage.NewStamper(i, signer)
-	return &stamperPutter{Storer: s, stamper: stamper}
-}
-
-func (p *stamperPutter) Put(ctx context.Context, mode storage.ModePut, chs ...swarm.Chunk) (exists []bool, err error) {
-	var (
-		ctp = make([]swarm.Chunk, 0, len(chs))
-		idx = make([]int, 0, len(chs))
-	)
-	exists = make([]bool, len(chs))
-
-	for i, c := range chs {
-		has, err := p.Storer.Has(ctx, c.Address())
-		if err != nil {
-			return nil, err
-		}
-		if has || swarm.ContainsChunkWithAddress(chs[:i], c.Address()) {
-			exists[i] = true
-			continue
-		}
-		stamp, err := p.stamper.Stamp(c.Address())
-		if err != nil {
-			return nil, err
-		}
-		chs[i] = c.WithStamp(stamp)
-		ctp = append(ctp, chs[i])
-		idx = append(idx, i)
-	}
-
-	exists2, err := p.Storer.Put(ctx, mode, ctp...)
+	stamper, save, err := s.getStamper(opts.BatchID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get stamper: %w", err)
 	}
-	for i, v := range idx {
-		exists[v] = exists2[i]
+
+	var session storer.PutterSession
+	if opts.Deferred || opts.Pin {
+		session, err = s.storer.Upload(ctx, opts.Pin, opts.TagID)
+	} else {
+		session = s.storer.DirectUpload()
 	}
-	return exists, nil
+
+	if err != nil {
+		return nil, fmt.Errorf("failed creating session: %w", err)
+	}
+
+	return &putterSessionWrapper{
+		PutterSession: session,
+		stamper:       stamper,
+		save:          save,
+	}, nil
+}
+
+func (s *Service) newStampedPutter(ctx context.Context, opts putterOptions, stamp *postage.Stamp) (storer.PutterSession, error) {
+	if !opts.Deferred && s.beeMode == DevMode {
+		return nil, errUnsupportedDevNodeOperation
+	}
+
+	storedBatch, err := s.batchStore.Get(stamp.BatchID())
+	if err != nil {
+		return nil, errInvalidPostageBatch
+	}
+
+	var session storer.PutterSession
+	if opts.Deferred || opts.Pin {
+		session, err = s.storer.Upload(ctx, opts.Pin, opts.TagID)
+		if err != nil {
+			return nil, fmt.Errorf("failed creating session: %w", err)
+		}
+	} else {
+		session = s.storer.DirectUpload()
+	}
+
+	stamper := postage.NewPresignedStamper(stamp, storedBatch.Owner)
+
+	return &putterSessionWrapper{
+		PutterSession: session,
+		stamper:       stamper,
+		save:          func() error { return nil },
+	}, nil
 }
 
 type pipelineFunc func(context.Context, io.Reader) (swarm.Address, error)
 
-func requestPipelineFn(s storage.Putter, r *http.Request) pipelineFunc {
-	mode, encrypt := requestModePut(r), requestEncrypt(r)
+func requestPipelineFn(s storage.Putter, encrypt bool, rLevel redundancy.Level) pipelineFunc {
 	return func(ctx context.Context, r io.Reader) (swarm.Address, error) {
-		pipe := builder.NewPipelineBuilder(ctx, s, mode, encrypt)
+		pipe := builder.NewPipelineBuilder(ctx, s, encrypt, rLevel)
 		return builder.FeedPipeline(ctx, pipe, r)
 	}
 }
 
-func requestPipelineFactory(ctx context.Context, s storage.Putter, r *http.Request) func() pipeline.Interface {
-	mode, encrypt := requestModePut(r), requestEncrypt(r)
+func requestPipelineFactory(ctx context.Context, s storage.Putter, encrypt bool, rLevel redundancy.Level) func() pipeline.Interface {
 	return func() pipeline.Interface {
-		return builder.NewPipelineBuilder(ctx, s, mode, encrypt)
+		return builder.NewPipelineBuilder(ctx, s, encrypt, rLevel)
 	}
 }
 
-// calculateNumberOfChunks calculates the number of chunks in an arbitrary
+type cleanupOnErrWriter struct {
+	http.ResponseWriter
+	logger log.Logger
+	onErr  func() error
+}
+
+func (r *cleanupOnErrWriter) WriteHeader(statusCode int) {
+	// if there is an error status returned, cleanup.
+	if statusCode >= http.StatusBadRequest {
+		err := r.onErr()
+		if err != nil {
+			r.logger.Debug("failed cleaning up", "err", err)
+		}
+	}
+	r.ResponseWriter.WriteHeader(statusCode)
+}
+
+// CalculateNumberOfChunks calculates the number of chunks in an arbitrary
 // content length.
-func calculateNumberOfChunks(contentLength int64, isEncrypted bool) int64 {
+func CalculateNumberOfChunks(contentLength int64, isEncrypted bool) int64 {
 	if contentLength <= swarm.ChunkSize {
 		return 1
 	}
@@ -985,13 +836,11 @@ func calculateNumberOfChunks(contentLength int64, isEncrypted bool) int64 {
 	return int64(totalChunks) + 1
 }
 
-func requestCalculateNumberOfChunks(r *http.Request) int64 {
-	if !strings.Contains(r.Header.Get(contentTypeHeader), "multipart") && r.ContentLength > 0 {
-		return calculateNumberOfChunks(r.ContentLength, requestEncrypt(r))
+// defaultUploadMethod returns true for deferred when the deferred header is not present.
+func defaultUploadMethod(deferred *bool) bool {
+	if deferred == nil {
+		return true
 	}
-	return 0
-}
 
-func noopWaitFn() error {
-	return nil
+	return *deferred
 }

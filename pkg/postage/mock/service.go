@@ -5,11 +5,11 @@
 package mock
 
 import (
-	"bytes"
+	"context"
 	"math/big"
 	"sync"
 
-	"github.com/ethersphere/bee/pkg/postage"
+	"github.com/ethersphere/bee/v2/pkg/postage"
 )
 
 type optionFunc func(*mockPostage)
@@ -51,19 +51,11 @@ type mockPostage struct {
 	acceptAll  bool
 }
 
-func (m *mockPostage) SetExpired() error {
-	return nil
-}
-
-func (m *mockPostage) HandleStampExpiry(id []byte) {
+func (m *mockPostage) HandleStampExpiry(ctx context.Context, id []byte) error {
 	m.issuerLock.Lock()
 	defer m.issuerLock.Unlock()
-
-	for _, v := range m.issuersMap {
-		if bytes.Equal(id, v.ID()) {
-			v.SetExpired(true)
-		}
-	}
+	delete(m.issuersMap, string(id))
+	return nil
 }
 
 func (m *mockPostage) Add(s *postage.StampIssuer) error {
@@ -78,7 +70,7 @@ func (m *mockPostage) StampIssuers() []*postage.StampIssuer {
 	m.issuerLock.Lock()
 	defer m.issuerLock.Unlock()
 
-	issuers := []*postage.StampIssuer{}
+	issuers := make([]*postage.StampIssuer, 0)
 	for _, v := range m.issuersMap {
 		issuers = append(issuers, v)
 	}
@@ -87,7 +79,7 @@ func (m *mockPostage) StampIssuers() []*postage.StampIssuer {
 
 func (m *mockPostage) GetStampIssuer(id []byte) (*postage.StampIssuer, func() error, error) {
 	if m.acceptAll {
-		return postage.NewStampIssuer("test fallback", "test identity", id, big.NewInt(3), 24, 6, 1000, true), func() error { return nil }, nil
+		return postage.NewStampIssuer("test fallback", "test identity", id, big.NewInt(3), 24, 6, 1000, false), func() error { return nil }, nil
 	}
 
 	m.issuerLock.Lock()
@@ -97,7 +89,10 @@ func (m *mockPostage) GetStampIssuer(id []byte) (*postage.StampIssuer, func() er
 	if !exists {
 		return nil, nil, postage.ErrNotFound
 	}
-	return i, func() error { return nil }, nil
+
+	return i, func() error {
+		return nil
+	}, nil
 }
 
 func (m *mockPostage) IssuerUsable(_ *postage.StampIssuer) bool {
@@ -113,3 +108,5 @@ func (m *mockPostage) HandleDepthIncrease(_ []byte, _ uint8) {}
 func (m *mockPostage) Close() error {
 	return nil
 }
+
+var _ postage.BatchExpiryHandler = (*mockPostage)(nil)

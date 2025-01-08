@@ -5,13 +5,18 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
+	"sync"
 
-	"github.com/ethersphere/bee/pkg/jsonhttp"
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/ethersphere/bee/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
+	"github.com/ethersphere/bee/v2/pkg/storage"
+	storer "github.com/ethersphere/bee/v2/pkg/storer"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/traversal"
 	"github.com/gorilla/mux"
+	"golang.org/x/sync/semaphore"
 )
 
 // pinRootHash pins root hash of given reference. This method is idempotent.
@@ -26,7 +31,7 @@ func (s *Service) pinRootHash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	has, err := s.pinning.HasPin(paths.Reference)
+	has, err := s.storer.HasPin(paths.Reference)
 	if err != nil {
 		logger.Debug("pin root hash: has pin failed", "chunk_address", paths.Reference, "error", err)
 		logger.Error(nil, "pin root hash: has pin failed")
@@ -38,14 +43,74 @@ func (s *Service) pinRootHash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch err = s.pinning.CreatePin(r.Context(), paths.Reference, true); {
-	case errors.Is(err, storage.ErrNotFound):
-		jsonhttp.NotFound(w, nil)
+	putter, err := s.storer.NewCollection(r.Context())
+	if err != nil {
+		logger.Debug("pin root hash: failed to create collection", "error", err)
+		logger.Error(nil, "pin root hash: failed to create collection")
+		jsonhttp.InternalServerError(w, "pin root hash: create collection failed")
 		return
-	case err != nil:
-		logger.Debug("pin root hash: create pin failed", "chunk_address", paths.Reference, "error", err)
-		logger.Error(nil, "pin root hash: create pin failed")
-		jsonhttp.InternalServerError(w, "pin root hash: creation of tracking pin failed")
+	}
+
+	getter := s.storer.Download(true)
+	traverser := traversal.New(getter, s.storer.Cache())
+
+	sem := semaphore.NewWeighted(100)
+	var errTraverse error
+	var mtxErr sync.Mutex
+	var wg sync.WaitGroup
+
+	err = traverser.Traverse(
+		r.Context(),
+		paths.Reference,
+		func(address swarm.Address) error {
+			mtxErr.Lock()
+			if errTraverse != nil {
+				mtxErr.Unlock()
+				return errTraverse
+			}
+			mtxErr.Unlock()
+			if err := sem.Acquire(r.Context(), 1); err != nil {
+				return err
+			}
+			wg.Add(1)
+			go func() {
+				var err error
+				defer func() {
+					sem.Release(1)
+					wg.Done()
+					if err != nil {
+						mtxErr.Lock()
+						errTraverse = errors.Join(errTraverse, err)
+						mtxErr.Unlock()
+					}
+				}()
+				chunk, err := getter.Get(r.Context(), address)
+				if err != nil {
+					return
+				}
+				err = putter.Put(r.Context(), chunk)
+			}()
+			return nil
+		},
+	)
+
+	wg.Wait()
+
+	if err := errors.Join(err, errTraverse); err != nil {
+		logger.Error(errors.Join(err, putter.Cleanup()), "pin collection failed")
+		if errors.Is(err, storage.ErrNotFound) {
+			jsonhttp.NotFound(w, "pin collection failed")
+			return
+		}
+		jsonhttp.InternalServerError(w, "pin collection failed")
+		return
+	}
+
+	err = putter.Done(paths.Reference)
+	if err != nil {
+		logger.Debug("pin collection failed on done", "error", err)
+		logger.Error(nil, "pin collection failed")
+		jsonhttp.InternalServerError(w, "pin collection failed")
 		return
 	}
 
@@ -64,7 +129,7 @@ func (s *Service) unpinRootHash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	has, err := s.pinning.HasPin(paths.Reference)
+	has, err := s.storer.HasPin(paths.Reference)
 	if err != nil {
 		logger.Debug("unpin root hash: has pin failed", "chunk_address", paths.Reference, "error", err)
 		logger.Error(nil, "unpin root hash: has pin failed")
@@ -76,7 +141,7 @@ func (s *Service) unpinRootHash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.pinning.DeletePin(r.Context(), paths.Reference); err != nil {
+	if err := s.storer.DeletePin(r.Context(), paths.Reference); err != nil {
 		logger.Debug("unpin root hash: delete pin failed", "chunk_address", paths.Reference, "error", err)
 		logger.Error(nil, "unpin root hash: delete pin failed")
 		jsonhttp.InternalServerError(w, "unpin root hash: deletion of pin failed")
@@ -98,7 +163,7 @@ func (s *Service) getPinnedRootHash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	has, err := s.pinning.HasPin(paths.Reference)
+	has, err := s.storer.HasPin(paths.Reference)
 	if err != nil {
 		logger.Debug("pinned root hash: has pin failed", "chunk_address", paths.Reference, "error", err)
 		logger.Error(nil, "pinned root hash: has pin failed")
@@ -122,7 +187,7 @@ func (s *Service) getPinnedRootHash(w http.ResponseWriter, r *http.Request) {
 func (s *Service) listPinnedRootHashes(w http.ResponseWriter, r *http.Request) {
 	logger := s.logger.WithName("get_pins").Build()
 
-	pinned, err := s.pinning.Pins()
+	pinned, err := s.storer.Pins()
 	if err != nil {
 		logger.Debug("list pinned root references: unable to list references", "error", err)
 		logger.Error(nil, "list pinned root references: unable to list references")
@@ -135,4 +200,54 @@ func (s *Service) listPinnedRootHashes(w http.ResponseWriter, r *http.Request) {
 	}{
 		References: pinned,
 	})
+}
+
+type PinIntegrityResponse struct {
+	Reference swarm.Address `json:"reference"`
+	Total     int           `json:"total"`
+	Missing   int           `json:"missing"`
+	Invalid   int           `json:"invalid"`
+}
+
+func (s *Service) pinIntegrityHandler(w http.ResponseWriter, r *http.Request) {
+	logger := s.logger.WithName("get_pin_integrity").Build()
+
+	querie := struct {
+		Ref swarm.Address `map:"ref"`
+	}{}
+
+	if response := s.mapStructure(r.URL.Query(), &querie); response != nil {
+		response("invalid query params", logger, w)
+		return
+	}
+
+	out := make(chan storer.PinStat)
+
+	go s.pinIntegrity.Check(r.Context(), logger, querie.Ref.String(), out)
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Transfer-Encoding", "chunked")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	enc := json.NewEncoder(w)
+
+	for v := range out {
+		resp := PinIntegrityResponse{
+			Reference: v.Ref,
+			Total:     v.Total,
+			Missing:   v.Missing,
+			Invalid:   v.Invalid,
+		}
+		if err := enc.Encode(resp); err != nil {
+			break
+		}
+		flusher.Flush()
+	}
 }

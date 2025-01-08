@@ -5,52 +5,45 @@
 package puller
 
 import (
-	m "github.com/ethersphere/bee/pkg/metrics"
+	m "github.com/ethersphere/bee/v2/pkg/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 type metrics struct {
-	HistWorkerIterCounter prometheus.Counter // counts the number of historical syncing iterations
-	HistWorkerDoneCounter prometheus.Counter // count number of finished historical syncing jobs
-	HistWorkerErrCounter  prometheus.Counter // count number of errors
-	LiveWorkerIterCounter prometheus.Counter // counts the number of live syncing iterations
-	LiveWorkerErrCounter  prometheus.Counter // count number of errors
-	MaxUintErrCounter     prometheus.Counter // how many times we got maxuint as topmost
+	SyncWorkerIterCounter prometheus.Counter    // counts the number of syncing iterations
+	SyncWorkerCounter     prometheus.Gauge      // count number of syncing jobs
+	SyncedCounter         prometheus.CounterVec // number of synced chunks
+	SyncWorkerErrCounter  prometheus.Counter    // count number of errors
+	MaxUintErrCounter     prometheus.Counter    // how many times we got maxuint as topmost
 }
 
 func newMetrics() metrics {
 	subsystem := "puller"
 
 	return metrics{
-		HistWorkerIterCounter: prometheus.NewCounter(prometheus.CounterOpts{
+		SyncWorkerIterCounter: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,
 			Subsystem: subsystem,
-			Name:      "hist_worker_iterations",
-			Help:      "Total history worker iterations.",
+			Name:      "worker_iterations",
+			Help:      "Total worker iterations.",
 		}),
-		HistWorkerDoneCounter: prometheus.NewCounter(prometheus.CounterOpts{
+		SyncWorkerCounter: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: m.Namespace,
 			Subsystem: subsystem,
-			Name:      "hist_worker_done",
-			Help:      "Total history worker jobs done.",
+			Name:      "worker",
+			Help:      "Total active worker jobs.",
 		}),
-		HistWorkerErrCounter: prometheus.NewCounter(prometheus.CounterOpts{
+		SyncedCounter: *prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: m.Namespace,
 			Subsystem: subsystem,
-			Name:      "hist_worker_errors",
-			Help:      "Total history worker errors.",
-		}),
-		LiveWorkerIterCounter: prometheus.NewCounter(prometheus.CounterOpts{
+			Name:      "synced_chunks",
+			Help:      "Total synced chunks.",
+		}, []string{"type"}),
+		SyncWorkerErrCounter: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,
 			Subsystem: subsystem,
-			Name:      "live_worker_iterations",
-			Help:      "Total live worker iterations.",
-		}),
-		LiveWorkerErrCounter: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: m.Namespace,
-			Subsystem: subsystem,
-			Name:      "live_worker_errors",
-			Help:      "Total live worker errors.",
+			Name:      "worker_errors",
+			Help:      "Total worker errors.",
 		}),
 		MaxUintErrCounter: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: m.Namespace,

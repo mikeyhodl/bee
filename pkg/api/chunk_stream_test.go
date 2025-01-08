@@ -6,44 +6,33 @@ package api_test
 
 import (
 	"bytes"
-	"context"
 	"net/http"
 	"testing"
 	"time"
 
-	"github.com/ethersphere/bee/pkg/api"
-	"github.com/ethersphere/bee/pkg/log"
-	pinning "github.com/ethersphere/bee/pkg/pinning/mock"
-	mockpost "github.com/ethersphere/bee/pkg/postage/mock"
-	statestore "github.com/ethersphere/bee/pkg/statestore/mock"
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/ethersphere/bee/pkg/storage/mock"
-	testingc "github.com/ethersphere/bee/pkg/storage/testing"
-	"github.com/ethersphere/bee/pkg/swarm"
-	"github.com/ethersphere/bee/pkg/tags"
+	"github.com/ethersphere/bee/v2/pkg/api"
+	mockpost "github.com/ethersphere/bee/v2/pkg/postage/mock"
+	"github.com/ethersphere/bee/v2/pkg/spinlock"
+	testingc "github.com/ethersphere/bee/v2/pkg/storage/testing"
+	mockstorer "github.com/ethersphere/bee/v2/pkg/storer/mock"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
 	"github.com/gorilla/websocket"
 )
 
 // nolint:paralleltest
 func TestChunkUploadStream(t *testing.T) {
 	wsHeaders := http.Header{}
-	wsHeaders.Set(api.SwarmDeferredUploadHeader, "true")
-	wsHeaders.Set("Content-Type", "application/octet-stream")
-	wsHeaders.Set("Swarm-Postage-Batch-Id", batchOkStr)
+	wsHeaders.Set(api.ContentTypeHeader, "application/octet-stream")
+	wsHeaders.Set(api.SwarmPostageBatchIdHeader, batchOkStr)
 
 	var (
-		statestoreMock  = statestore.NewStateStore()
-		logger          = log.Noop
-		tag             = tags.NewTags(statestoreMock, logger)
-		storerMock      = mock.NewStorer()
-		pinningMock     = pinning.NewServiceMock()
-		_, wsConn, _, _ = newTestServer(t, testServerOptions{
-			Storer:    storerMock,
-			Pinning:   pinningMock,
-			Tags:      tag,
-			Post:      mockpost.New(mockpost.WithAcceptAll()),
-			WsPath:    "/chunks/stream",
-			WsHeaders: wsHeaders,
+		storerMock               = mockstorer.New()
+		_, wsConn, _, chanStorer = newTestServer(t, testServerOptions{
+			Storer:       storerMock,
+			Post:         mockpost.New(mockpost.WithAcceptAll()),
+			WsPath:       "/chunks/stream",
+			WsHeaders:    wsHeaders,
+			DirectUpload: true,
 		})
 	)
 
@@ -80,12 +69,9 @@ func TestChunkUploadStream(t *testing.T) {
 		}
 
 		for _, c := range chsToGet {
-			ch, err := storerMock.Get(context.Background(), storage.ModeGetRequest, c.Address())
+			err := spinlock.Wait(100*time.Millisecond, func() bool { return chanStorer.Has(c.Address()) })
 			if err != nil {
-				t.Fatal("failed to get chunk after upload", err)
-			}
-			if !ch.Equal(c) {
-				t.Fatal("invalid chunk read")
+				t.Fatal(err)
 			}
 		}
 	})

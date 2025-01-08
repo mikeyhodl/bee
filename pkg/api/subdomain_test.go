@@ -10,15 +10,13 @@ import (
 	"path"
 	"testing"
 
-	"github.com/ethersphere/bee/pkg/api"
-	"github.com/ethersphere/bee/pkg/jsonhttp/jsonhttptest"
-	"github.com/ethersphere/bee/pkg/log"
-	mockpost "github.com/ethersphere/bee/pkg/postage/mock"
-	resolverMock "github.com/ethersphere/bee/pkg/resolver/mock"
-	statestore "github.com/ethersphere/bee/pkg/statestore/mock"
-	"github.com/ethersphere/bee/pkg/storage/mock"
-	"github.com/ethersphere/bee/pkg/swarm"
-	"github.com/ethersphere/bee/pkg/tags"
+	"github.com/ethersphere/bee/v2/pkg/api"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp/jsonhttptest"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	mockpost "github.com/ethersphere/bee/v2/pkg/postage/mock"
+	resolverMock "github.com/ethersphere/bee/v2/pkg/resolver/mock"
+	mockstorer "github.com/ethersphere/bee/v2/pkg/storer/mock"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
 )
 
 func TestSubdomains(t *testing.T) {
@@ -42,7 +40,7 @@ func TestSubdomains(t *testing.T) {
 					name: "robots.txt",
 					dir:  "",
 					header: http.Header{
-						"Content-Type": {"text/plain; charset=utf-8"},
+						api.ContentTypeHeader: {"text/plain; charset=utf-8"},
 					},
 				},
 				{
@@ -50,7 +48,7 @@ func TestSubdomains(t *testing.T) {
 					name: "1.png",
 					dir:  "img",
 					header: http.Header{
-						"Content-Type": {"image/png"},
+						api.ContentTypeHeader: {"image/png"},
 					},
 				},
 				{
@@ -58,7 +56,7 @@ func TestSubdomains(t *testing.T) {
 					name: "2.png",
 					dir:  "img",
 					header: http.Header{
-						"Content-Type": {"image/png"},
+						api.ContentTypeHeader: {"image/png"},
 					},
 				},
 			},
@@ -76,7 +74,7 @@ func TestSubdomains(t *testing.T) {
 					name: "index.html",
 					dir:  "",
 					header: http.Header{
-						"Content-Type": {"text/html; charset=utf-8"},
+						api.ContentTypeHeader: {"text/html; charset=utf-8"},
 					},
 				},
 				{
@@ -84,24 +82,21 @@ func TestSubdomains(t *testing.T) {
 					name: "error.html",
 					dir:  "",
 					header: http.Header{
-						"Content-Type": {"text/html; charset=utf-8"},
+						api.ContentTypeHeader: {"text/html; charset=utf-8"},
 					},
 				},
 			},
 		},
 	} {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
 			var (
 				dirUploadResource = "/bzz"
-				storer            = mock.NewStorer()
-				mockStatestore    = statestore.NewStateStore()
+				storer            = mockstorer.New()
 				logger            = log.Noop
 				client, _, _, _   = newTestServer(t, testServerOptions{
 					Storer:          storer,
-					Tags:            tags.NewTags(mockStatestore, logger),
 					Logger:          logger,
 					PreventRedirect: true,
 					Post:            mockpost.New(mockpost.WithAcceptAll()),
@@ -140,7 +135,7 @@ func TestSubdomains(t *testing.T) {
 				jsonhttptest.WithRequestHeader(api.SwarmPostageBatchIdHeader, batchOkStr),
 				jsonhttptest.WithRequestBody(tarReader),
 				jsonhttptest.WithRequestHeader(api.SwarmCollectionHeader, "True"),
-				jsonhttptest.WithRequestHeader("Content-Type", api.ContentTypeTar),
+				jsonhttptest.WithRequestHeader(api.ContentTypeHeader, api.ContentTypeTar),
 				jsonhttptest.WithUnmarshalJSONResponse(&resp),
 			}
 			if tc.indexFilenameOption != nil {

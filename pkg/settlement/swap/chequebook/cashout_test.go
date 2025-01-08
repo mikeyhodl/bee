@@ -11,17 +11,17 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethersphere/bee/pkg/settlement/swap/chequebook"
-	chequestoremock "github.com/ethersphere/bee/pkg/settlement/swap/chequestore/mock"
-	storemock "github.com/ethersphere/bee/pkg/statestore/mock"
-	"github.com/ethersphere/bee/pkg/transaction/backendmock"
-	transactionmock "github.com/ethersphere/bee/pkg/transaction/mock"
-	"github.com/ethersphere/bee/pkg/util/abiutil"
+	"github.com/ethersphere/bee/v2/pkg/settlement/swap/chequebook"
+	chequestoremock "github.com/ethersphere/bee/v2/pkg/settlement/swap/chequestore/mock"
+	storemock "github.com/ethersphere/bee/v2/pkg/statestore/mock"
+	"github.com/ethersphere/bee/v2/pkg/transaction/backendmock"
+	transactionmock "github.com/ethersphere/bee/v2/pkg/transaction/mock"
+	"github.com/ethersphere/bee/v2/pkg/util/abiutil"
 	"github.com/ethersphere/go-sw3-abi/sw3abi"
 )
 
 var (
-	chequebookABI          = abiutil.MustParseABI(sw3abi.ERC20SimpleSwapABIv0_3_1)
+	chequebookABI          = abiutil.MustParseABI(sw3abi.ERC20SimpleSwapABIv0_6_5)
 	chequeCashedEventType  = chequebookABI.Events["ChequeCashed"]
 	chequeBouncedEventType = chequebookABI.Events["ChequeBounced"]
 )
@@ -69,8 +69,13 @@ func TestCashout(t *testing.T) {
 					Logs: []*types.Log{
 						{
 							Address: chequebookAddress,
-							Topics:  []common.Hash{chequeCashedEventType.ID, cheque.Beneficiary.Hash(), recipientAddress.Hash(), cheque.Beneficiary.Hash()},
-							Data:    logData,
+							Topics: []common.Hash{
+								chequeCashedEventType.ID,
+								common.BytesToHash(cheque.Beneficiary.Bytes()),
+								common.BytesToHash(recipientAddress.Bytes()),
+								common.BytesToHash(cheque.Beneficiary.Bytes()),
+							},
+							Data: logData,
 						},
 					},
 				}, nil
@@ -165,8 +170,13 @@ func TestCashoutBounced(t *testing.T) {
 					Logs: []*types.Log{
 						{
 							Address: chequebookAddress,
-							Topics:  []common.Hash{chequeCashedEventType.ID, cheque.Beneficiary.Hash(), recipientAddress.Hash(), cheque.Beneficiary.Hash()},
-							Data:    chequeCashedLogData,
+							Topics: []common.Hash{
+								chequeCashedEventType.ID,
+								common.BytesToHash(cheque.Beneficiary.Bytes()),
+								common.BytesToHash(recipientAddress.Bytes()),
+								common.BytesToHash(cheque.Beneficiary.Bytes()),
+							},
+							Data: chequeCashedLogData,
 						},
 						{
 							Address: chequebookAddress,

@@ -9,31 +9,29 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/ethersphere/bee/pkg/api"
-	"github.com/ethersphere/bee/pkg/jsonhttp"
-	"github.com/ethersphere/bee/pkg/jsonhttp/jsonhttptest"
-	"github.com/ethersphere/bee/pkg/log"
-	statestore "github.com/ethersphere/bee/pkg/statestore/mock"
-	"github.com/ethersphere/bee/pkg/steward/mock"
-	smock "github.com/ethersphere/bee/pkg/storage/mock"
-	"github.com/ethersphere/bee/pkg/swarm"
-	"github.com/ethersphere/bee/pkg/tags"
+	"github.com/ethersphere/bee/v2/pkg/api"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp/jsonhttptest"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	mockpost "github.com/ethersphere/bee/v2/pkg/postage/mock"
+	"github.com/ethersphere/bee/v2/pkg/steward/mock"
+	mockstorer "github.com/ethersphere/bee/v2/pkg/storer/mock"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
 )
 
 // nolint:paralleltest
 func TestStewardship(t *testing.T) {
 	var (
-		logger         = log.Noop
-		statestoreMock = statestore.NewStateStore()
-		stewardMock    = &mock.Steward{}
-		storer         = smock.NewStorer()
-		addr           = swarm.NewAddress([]byte{31: 128})
+		logger      = log.Noop
+		stewardMock = &mock.Steward{}
+		storer      = mockstorer.New()
+		addr        = swarm.NewAddress([]byte{31: 128})
 	)
 	client, _, _, _ := newTestServer(t, testServerOptions{
 		Storer:  storer,
-		Tags:    tags.NewTags(statestoreMock, logger),
 		Logger:  logger,
 		Steward: stewardMock,
+		Post:    mockpost.New(mockpost.WithAcceptAll()),
 	})
 
 	t.Run("re-upload", func(t *testing.T) {
@@ -42,6 +40,7 @@ func TestStewardship(t *testing.T) {
 				Message: http.StatusText(http.StatusOK),
 				Code:    http.StatusOK,
 			}),
+			jsonhttptest.WithRequestHeader("Swarm-Postage-Batch-Id", "aa"),
 		)
 		if !stewardMock.LastAddress().Equal(addr) {
 			t.Fatalf("\nhave address: %q\nwant address: %q", stewardMock.LastAddress().String(), addr.String())
@@ -61,10 +60,12 @@ func TestStewardship(t *testing.T) {
 	})
 }
 
-func Test_stewardshipHandlers_invalidInputs(t *testing.T) {
+func TestStewardshipInvalidInputs(t *testing.T) {
 	t.Parallel()
 
-	client, _, _, _ := newTestServer(t, testServerOptions{})
+	client, _, _, _ := newTestServer(t, testServerOptions{
+		Storer: mockstorer.New(),
+	})
 
 	tests := []struct {
 		name    string
@@ -99,9 +100,7 @@ func Test_stewardshipHandlers_invalidInputs(t *testing.T) {
 	}}
 
 	for _, method := range []string{http.MethodGet, http.MethodPut} {
-		method := method
 		for _, tc := range tests {
-			tc := tc
 			t.Run(method+" "+tc.name, func(t *testing.T) {
 				t.Parallel()
 
@@ -111,4 +110,33 @@ func Test_stewardshipHandlers_invalidInputs(t *testing.T) {
 			})
 		}
 	}
+
+	t.Run("batch with id not found", func(t *testing.T) {
+		t.Parallel()
+
+		jsonhttptest.Request(t, client, http.MethodPut, "/stewardship/1234", http.StatusNotFound,
+			jsonhttptest.WithRequestHeader(api.SwarmPostageBatchIdHeader, "1234"),
+			jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
+				Code:    http.StatusNotFound,
+				Message: "batch with id not found",
+			}),
+		)
+	})
+	t.Run("invalid batch id", func(t *testing.T) {
+		t.Parallel()
+
+		jsonhttptest.Request(t, client, http.MethodPut, "/stewardship/1234", http.StatusBadRequest,
+			jsonhttptest.WithRequestHeader(api.SwarmPostageBatchIdHeader, "1234G"),
+			jsonhttptest.WithExpectedJSONResponse(jsonhttp.StatusResponse{
+				Code:    http.StatusBadRequest,
+				Message: "invalid header params",
+				Reasons: []jsonhttp.Reason{
+					{
+						Field: api.SwarmPostageBatchIdHeader,
+						Error: api.HexInvalidByteError('G').Error(),
+					},
+				},
+			}),
+		)
+	})
 }

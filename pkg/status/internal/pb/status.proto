@@ -20,4 +20,10 @@ message Snapshot {
   uint32 StorageRadius = 3;
   uint64 ConnectedPeers = 4;
   uint64 NeighborhoodSize = 5;
+  string BeeMode = 6;
+  uint64 BatchCommitment = 7;
+  bool IsReachable = 8;
+  uint64 ReserveSizeWithinRadius = 9;
+  uint64 LastSyncedBlock = 10;
+  uint32 CommittedDepth = 11;
 }

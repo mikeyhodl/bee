@@ -6,10 +6,11 @@ package cmd
 
 import (
 	"fmt"
-	"github.com/ethersphere/bee/pkg/node"
-	"github.com/ethersphere/bee/pkg/settlement/swap/erc20"
-	"github.com/spf13/cobra"
 	"strings"
+
+	"github.com/ethersphere/bee/v2/pkg/node"
+	"github.com/ethersphere/bee/v2/pkg/settlement/swap/erc20"
+	"github.com/spf13/cobra"
 )
 
 const blocktime = 15
@@ -39,7 +40,7 @@ func (c *command) initDeployCmd() error {
 			if swapEndpoint != "" {
 				blockchainRpcEndpoint = swapEndpoint
 			}
-			stateStore, err := node.InitStateStore(logger, dataDir)
+			stateStore, _, err := node.InitStateStore(logger, dataDir, 1000)
 			if err != nil {
 				return err
 			}
@@ -70,14 +71,7 @@ func (c *command) initDeployCmd() error {
 			defer swapBackend.Close()
 			defer transactionMonitor.Close()
 
-			chequebookFactory, err := node.InitChequebookFactory(
-				logger,
-				swapBackend,
-				chainID,
-				transactionService,
-				factoryAddress,
-				nil,
-			)
+			chequebookFactory, err := node.InitChequebookFactory(logger, swapBackend, chainID, transactionService, factoryAddress)
 			if err != nil {
 				return err
 			}

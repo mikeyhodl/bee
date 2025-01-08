@@ -7,17 +7,13 @@ package mock
 import (
 	"encoding"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"sync"
 
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/ethersphere/bee/v2/pkg/storage"
 )
 
 var _ storage.StateStorer = (*store)(nil)
-
-const mockSchemaNameKey = "schema_name"
 
 type store struct {
 	store map[string][]byte
@@ -27,10 +23,6 @@ type store struct {
 func NewStateStore() storage.StateStorer {
 	s := &store{
 		store: make(map[string][]byte),
-	}
-
-	if err := s.Put(mockSchemaNameKey, "mock_schema"); err != nil {
-		panic(fmt.Errorf("put schema name: %w", err))
 	}
 
 	return s
@@ -97,11 +89,6 @@ func (s *store) Iterate(prefix string, iterFunc storage.StateIterFunc) (err erro
 			return nil
 		}
 	}
-	return nil
-}
-
-// DB implements StateStorer.DB method.
-func (s *store) DB() *leveldb.DB {
 	return nil
 }
 

@@ -16,13 +16,13 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	chaincfg "github.com/ethersphere/bee/pkg/config"
-	"github.com/ethersphere/bee/pkg/log"
-	"github.com/ethersphere/bee/pkg/postage"
-	"github.com/ethersphere/bee/pkg/postage/listener"
-	"github.com/ethersphere/bee/pkg/util"
-	"github.com/ethersphere/bee/pkg/util/abiutil"
-	"github.com/ethersphere/bee/pkg/util/testutil"
+	chaincfg "github.com/ethersphere/bee/v2/pkg/config"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/postage"
+	"github.com/ethersphere/bee/v2/pkg/postage/listener"
+	"github.com/ethersphere/bee/v2/pkg/util/abiutil"
+	"github.com/ethersphere/bee/v2/pkg/util/syncutil"
+	"github.com/ethersphere/bee/v2/pkg/util/testutil"
 )
 
 var (
@@ -45,6 +45,8 @@ func toBatchBlock(block uint64) uint64 {
 }
 
 func TestListener(t *testing.T) {
+	t.Parallel()
+
 	const (
 		blockNumber = uint64(500)
 		timeout     = 5 * time.Second
@@ -359,7 +361,7 @@ func TestListener(t *testing.T) {
 		mf := newMockFilterer(
 			WithBlockNumberError(errors.New("dummy error")),
 		)
-		c := util.NewSignaler()
+		c := syncutil.NewSignaler()
 
 		l := listener.New(
 			c,
@@ -387,7 +389,7 @@ func TestListener(t *testing.T) {
 		mf := newMockFilterer(
 			WithBlockNumber(blockNumber),
 		)
-		c := util.NewSignaler()
+		c := syncutil.NewSignaler()
 
 		l := listener.New(c,
 			log.Noop,
@@ -417,6 +419,8 @@ func TestListener(t *testing.T) {
 }
 
 func TestListenerBatchState(t *testing.T) {
+	t.Parallel()
+
 	ev := newEventUpdaterMock()
 	mf := newMockFilterer()
 

@@ -8,7 +8,7 @@ import (
 	"encoding/binary"
 	"hash"
 
-	"github.com/ethersphere/bee/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
 )
 
 var _ Hash = (*Hasher)(nil)
@@ -25,7 +25,7 @@ var (
 //
 // The same hasher instance must not be called concurrently on more than one chunk.
 //
-// The same hasher instance is synchronously reuseable.
+// The same hasher instance is synchronously reusable.
 //
 // Sum gives back the tree to the pool and guaranteed to leave
 // the tree and itself in a state reusable for hashing a new chunk.
@@ -40,6 +40,19 @@ type Hasher struct {
 	span   []byte      // The span of the data subsumed under the chunk
 }
 
+// NewHasher gives back an instance of a Hasher struct
+func NewHasher(hasherFact func() hash.Hash) *Hasher {
+	conf := NewConf(hasherFact, swarm.BmtBranches, 32)
+
+	return &Hasher{
+		Conf:   conf,
+		result: make(chan []byte),
+		errc:   make(chan error, 1),
+		span:   make([]byte, SpanSize),
+		bmt:    newTree(conf.segmentSize, conf.maxSize, conf.depth, conf.hasher),
+	}
+}
+
 // Capacity returns the maximum amount of bytes that will be processed by this hasher implementation.
 // since BMT assumes a balanced binary tree, capacity it is always a power of 2
 func (h *Hasher) Capacity() int {
@@ -52,6 +65,11 @@ func LengthToSpan(length int64) []byte {
 	span := make([]byte, SpanSize)
 	binary.LittleEndian.PutUint64(span, uint64(length))
 	return span
+}
+
+// LengthFromSpan returns length from span.
+func LengthFromSpan(span []byte) uint64 {
+	return binary.LittleEndian.Uint64(span)
 }
 
 // SetHeaderInt64 sets the metadata preamble to the little endian binary representation of int64 argument for the current hash operation.
@@ -101,9 +119,9 @@ func (h *Hasher) Sum(b []byte) []byte {
 // with every full segment calls processSection in a go routine.
 func (h *Hasher) Write(b []byte) (int, error) {
 	l := len(b)
-	max := h.maxSize - h.size
-	if l > max {
-		l = max
+	maxVal := h.maxSize - h.size
+	if l > maxVal {
+		l = maxVal
 	}
 	copy(h.bmt.buffer[h.size:], b)
 	secsize := 2 * h.segmentSize
@@ -111,7 +129,7 @@ func (h *Hasher) Write(b []byte) (int, error) {
 	h.offset = h.size % secsize
 	h.size += l
 	to := h.size / secsize
-	if l == max {
+	if l == maxVal {
 		to--
 	}
 	h.pos = to

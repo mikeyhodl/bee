@@ -16,35 +16,31 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethersphere/bee/pkg/accounting"
-	"github.com/ethersphere/bee/pkg/addressbook"
-	"github.com/ethersphere/bee/pkg/crypto"
-	"github.com/ethersphere/bee/pkg/feeds"
-	"github.com/ethersphere/bee/pkg/feeds/factory"
-	"github.com/ethersphere/bee/pkg/file"
-	"github.com/ethersphere/bee/pkg/file/joiner"
-	"github.com/ethersphere/bee/pkg/file/loadsave"
-	"github.com/ethersphere/bee/pkg/hive"
-	"github.com/ethersphere/bee/pkg/log"
-	"github.com/ethersphere/bee/pkg/manifest"
-	"github.com/ethersphere/bee/pkg/netstore"
-	"github.com/ethersphere/bee/pkg/p2p/libp2p"
-	"github.com/ethersphere/bee/pkg/postage"
-	"github.com/ethersphere/bee/pkg/pricer"
-	"github.com/ethersphere/bee/pkg/pricing"
-	"github.com/ethersphere/bee/pkg/retrieval"
-	"github.com/ethersphere/bee/pkg/settlement/pseudosettle"
-	"github.com/ethersphere/bee/pkg/settlement/swap/chequebook"
-	"github.com/ethersphere/bee/pkg/shed"
-	"github.com/ethersphere/bee/pkg/spinlock"
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/ethersphere/bee/pkg/storage/inmemstore"
-	"github.com/ethersphere/bee/pkg/swarm"
-	"github.com/ethersphere/bee/pkg/topology"
-	"github.com/ethersphere/bee/pkg/topology/kademlia"
-	"github.com/ethersphere/bee/pkg/topology/lightnode"
-	"github.com/ethersphere/bee/pkg/tracing"
-	"github.com/ethersphere/bee/pkg/transaction"
+	"github.com/ethersphere/bee/v2/pkg/accounting"
+	"github.com/ethersphere/bee/v2/pkg/addressbook"
+	"github.com/ethersphere/bee/v2/pkg/crypto"
+	"github.com/ethersphere/bee/v2/pkg/feeds"
+	"github.com/ethersphere/bee/v2/pkg/feeds/factory"
+	"github.com/ethersphere/bee/v2/pkg/file"
+	"github.com/ethersphere/bee/v2/pkg/file/joiner"
+	"github.com/ethersphere/bee/v2/pkg/file/loadsave"
+	"github.com/ethersphere/bee/v2/pkg/hive"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/manifest"
+	"github.com/ethersphere/bee/v2/pkg/p2p/libp2p"
+	"github.com/ethersphere/bee/v2/pkg/postage"
+	"github.com/ethersphere/bee/v2/pkg/pricer"
+	"github.com/ethersphere/bee/v2/pkg/pricing"
+	"github.com/ethersphere/bee/v2/pkg/retrieval"
+	"github.com/ethersphere/bee/v2/pkg/settlement/pseudosettle"
+	"github.com/ethersphere/bee/v2/pkg/spinlock"
+	"github.com/ethersphere/bee/v2/pkg/storage"
+	storer "github.com/ethersphere/bee/v2/pkg/storer"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/topology"
+	"github.com/ethersphere/bee/v2/pkg/topology/kademlia"
+	"github.com/ethersphere/bee/v2/pkg/topology/lightnode"
+	"github.com/ethersphere/bee/v2/pkg/tracing"
 	"github.com/hashicorp/go-multierror"
 	ma "github.com/multiformats/go-multiaddr"
 )
@@ -67,15 +63,9 @@ func bootstrapNode(
 	addr string,
 	swarmAddress swarm.Address,
 	nonce []byte,
-	chainID int64,
-	overlayEthAddress common.Address,
 	addressbook addressbook.Interface,
 	bootnodes []ma.Multiaddr,
 	lightNodes *lightnode.Container,
-	chequebookService chequebook.Service,
-	chequeStore chequebook.ChequeStore,
-	cashoutService chequebook.CashoutService,
-	transactionService transaction.Service,
 	stateStore storage.StateStorer,
 	signer crypto.Signer,
 	networkID uint64,
@@ -118,23 +108,15 @@ func bootstrapNode(
 	b.p2pService = p2ps
 	b.p2pHalter = p2ps
 
-	hive, err := hive.New(p2ps, addressbook, networkID, o.BootnodeMode, o.AllowPrivateCIDRs, logger)
-	if err != nil {
-		return nil, fmt.Errorf("hive: %w", err)
-	}
+	hive := hive.New(p2ps, addressbook, networkID, o.BootnodeMode, o.AllowPrivateCIDRs, logger)
 
 	if err = p2ps.AddProtocol(hive.Protocol()); err != nil {
 		return nil, fmt.Errorf("hive service: %w", err)
 	}
 	b.hiveCloser = hive
 
-	metricsDB, err := shed.NewDBWrap(stateStore.DB())
-	if err != nil {
-		return nil, fmt.Errorf("unable to create metrics storage for kademlia: %w", err)
-	}
-
-	kad, err := kademlia.New(swarmAddress, addressbook, hive, p2ps, &noopPinger{}, metricsDB, logger,
-		kademlia.Options{Bootnodes: bootnodes, BootnodeMode: o.BootnodeMode, StaticNodes: o.StaticNodes})
+	kad, err := kademlia.New(swarmAddress, addressbook, hive, p2ps, logger,
+		kademlia.Options{Bootnodes: bootnodes, BootnodeMode: o.BootnodeMode, StaticNodes: o.StaticNodes, DataDir: o.DataDir})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create kademlia: %w", err)
 	}
@@ -169,7 +151,7 @@ func bootstrapNode(
 	}
 	b.accountingCloser = acc
 
-	// bootstraper mode uses the light node refresh rate
+	// bootstrapper mode uses the light node refresh rate
 	enforcedRefreshRate := big.NewInt(lightRefreshRate)
 
 	pseudosettleService := pseudosettle.New(p2ps, logger, stateStore, acc, enforcedRefreshRate, enforcedRefreshRate, p2ps)
@@ -181,18 +163,23 @@ func bootstrapNode(
 
 	pricing.SetPaymentThresholdObserver(acc)
 
-	noopValidStamp := func(chunk swarm.Chunk, _ []byte) (swarm.Chunk, error) {
-		return chunk, nil
+	localStore, err := storer.New(ctx, "", &storer.Options{
+		CacheCapacity: 1_000_000,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("local store creation: %w", err)
 	}
+	b.localstoreCloser = localStore
 
-	storer := inmemstore.New()
+	radiusF := func() (uint8, error) { return swarm.MaxBins, nil }
 
-	retrieve := retrieval.New(swarmAddress, storer, p2ps, kad, logger, acc, pricer, tracer, o.RetrievalCaching, noopValidStamp)
+	retrieve := retrieval.New(swarmAddress, radiusF, localStore, p2ps, kad, logger, acc, pricer, tracer, o.RetrievalCaching)
 	if err = p2ps.AddProtocol(retrieve.Protocol()); err != nil {
 		return nil, fmt.Errorf("retrieval service: %w", err)
 	}
+	b.retrievalCloser = retrieve
 
-	ns := netstore.New(storer, noopValidStamp, retrieve, logger)
+	localStore.SetRetrievalService(retrieve)
 
 	if err := kad.Start(p2pCtx); err != nil {
 		return nil, err
@@ -209,10 +196,10 @@ func bootstrapNode(
 	logger.Info("bootstrap: trying to fetch stamps snapshot")
 
 	var (
-		snapshotReference swarm.Address
-		reader            file.Joiner
-		l                 int64
-		eventsJSON        []byte
+		snapshotRootCh swarm.Chunk
+		reader         file.Joiner
+		l              int64
+		eventsJSON     []byte
 	)
 
 	for i := 0; i < getSnapshotRetries; i++ {
@@ -223,7 +210,7 @@ func bootstrapNode(
 		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 
-		snapshotReference, err = getLatestSnapshot(ctx, ns, snapshotFeed)
+		snapshotRootCh, err = getLatestSnapshot(ctx, localStore.Download(true), snapshotFeed)
 		if err != nil {
 			logger.Warning("bootstrap: fetching snapshot failed", "error", err)
 			continue
@@ -242,7 +229,7 @@ func bootstrapNode(
 		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 
-		reader, l, err = joiner.New(ctx, ns, snapshotReference)
+		reader, l, err = joiner.NewJoiner(ctx, localStore.Download(true), localStore.Cache(), snapshotRootCh.Address(), snapshotRootCh)
 		if err != nil {
 			logger.Warning("bootstrap: file joiner failed", "error", err)
 			continue
@@ -282,22 +269,16 @@ func waitPeers(kad *kademlia.Kad) error {
 		_ = kad.EachConnectedPeer(func(_ swarm.Address, _ uint8) (bool, bool, error) {
 			count++
 			return false, false, nil
-		}, topology.Filter{})
+		}, topology.Select{})
 		return count >= minPeersCount
 	})
 }
 
-type noopPinger struct{}
-
-func (p *noopPinger) Ping(context.Context, swarm.Address, ...string) (time.Duration, error) {
-	return time.Duration(1), nil
-}
-
 func getLatestSnapshot(
 	ctx context.Context,
-	st storage.Storer,
+	st storage.Getter,
 	address swarm.Address,
-) (swarm.Address, error) {
+) (swarm.Chunk, error) {
 	ls := loadsave.NewReadonly(st)
 	feedFactory := factory.New(st)
 
@@ -306,12 +287,12 @@ func getLatestSnapshot(
 		ls,
 	)
 	if err != nil {
-		return swarm.ZeroAddress, fmt.Errorf("not a manifest: %w", err)
+		return nil, fmt.Errorf("not a manifest: %w", err)
 	}
 
 	e, err := m.Lookup(ctx, "/")
 	if err != nil {
-		return swarm.ZeroAddress, fmt.Errorf("node lookup: %w", err)
+		return nil, fmt.Errorf("node lookup: %w", err)
 	}
 
 	var (
@@ -322,42 +303,37 @@ func getLatestSnapshot(
 	if e := meta["swarm-feed-owner"]; e != "" {
 		owner, err = hex.DecodeString(e)
 		if err != nil {
-			return swarm.ZeroAddress, err
+			return nil, err
 		}
 	}
 	if e := meta["swarm-feed-topic"]; e != "" {
 		topic, err = hex.DecodeString(e)
 		if err != nil {
-			return swarm.ZeroAddress, err
+			return nil, err
 		}
 	}
 	if e := meta["swarm-feed-type"]; e != "" {
 		err := t.FromString(e)
 		if err != nil {
-			return swarm.ZeroAddress, err
+			return nil, err
 		}
 	}
 	if len(owner) == 0 || len(topic) == 0 {
-		return swarm.ZeroAddress, fmt.Errorf("node lookup: %s", "feed metadata absent")
+		return nil, fmt.Errorf("node lookup: %s", "feed metadata absent")
 	}
 	f := feeds.New(topic, common.BytesToAddress(owner))
 
 	l, err := feedFactory.NewLookup(*t, f)
 	if err != nil {
-		return swarm.ZeroAddress, fmt.Errorf("feed lookup failed: %w", err)
+		return nil, fmt.Errorf("feed lookup failed: %w", err)
 	}
 
 	u, _, _, err := l.At(ctx, time.Now().Unix(), 0)
 	if err != nil {
-		return swarm.ZeroAddress, err
+		return nil, err
 	}
 
-	_, ref, err := feeds.FromChunk(u)
-	if err != nil {
-		return swarm.ZeroAddress, err
-	}
-
-	return swarm.NewAddress(ref), nil
+	return feeds.GetWrappedChunk(ctx, st, u)
 }
 
 func batchStoreExists(s storage.StateStorer) (bool, error) {

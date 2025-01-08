@@ -11,22 +11,19 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ethersphere/bee/pkg/pushsync"
-	"github.com/ethersphere/bee/pkg/retrieval"
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/ethersphere/bee/pkg/swarm"
-	"github.com/ethersphere/bee/pkg/topology"
-	"github.com/ethersphere/bee/pkg/traversal"
-	"golang.org/x/sync/errgroup"
+	"github.com/ethersphere/bee/v2/pkg/postage"
+	"github.com/ethersphere/bee/v2/pkg/retrieval"
+	"github.com/ethersphere/bee/v2/pkg/storage"
+	storer "github.com/ethersphere/bee/v2/pkg/storer"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/topology"
+	"github.com/ethersphere/bee/v2/pkg/traversal"
 )
-
-// how many parallel push operations
-const parallelPush = 5
 
 type Interface interface {
 	// Reupload root hash and all of its underlying
 	// associated chunks to the network.
-	Reupload(context.Context, swarm.Address) error
+	Reupload(context.Context, swarm.Address, postage.Stamper) error
 
 	// IsRetrievable checks whether the content
 	// on the given address is retrievable.
@@ -34,18 +31,18 @@ type Interface interface {
 }
 
 type steward struct {
-	getter       storage.Getter
-	push         pushsync.PushSyncer
+	netStore     storer.NetStore
 	traverser    traversal.Traverser
 	netTraverser traversal.Traverser
+	netGetter    retrieval.Interface
 }
 
-func New(getter storage.Getter, t traversal.Traverser, r retrieval.Interface, p pushsync.PushSyncer) Interface {
+func New(ns storer.NetStore, r retrieval.Interface, joinerPutter storage.Putter) Interface {
 	return &steward{
-		getter:       getter,
-		push:         p,
-		traverser:    t,
-		netTraverser: traversal.New(&netGetter{r}),
+		netStore:     ns,
+		traverser:    traversal.New(ns.Download(true), joinerPutter),
+		netTraverser: traversal.New(&netGetter{r}, joinerPutter),
+		netGetter:    r,
 	}
 }
 
@@ -54,44 +51,41 @@ func New(getter storage.Getter, t traversal.Traverser, r retrieval.Interface, p 
 // addresses and push every chunk individually to the network.
 // It assumes all chunks are available locally. It is therefore
 // advisable to pin the content locally before trying to reupload it.
-func (s *steward) Reupload(ctx context.Context, root swarm.Address) error {
-	sem := make(chan struct{}, parallelPush)
-	eg, _ := errgroup.WithContext(ctx)
+func (s *steward) Reupload(ctx context.Context, root swarm.Address, stamper postage.Stamper) error {
+	uploaderSession := s.netStore.DirectUpload()
+	getter := s.netStore.Download(false)
+
 	fn := func(addr swarm.Address) error {
-		c, err := s.getter.Get(ctx, storage.ModeGetSync, addr)
+		c, err := getter.Get(ctx, addr)
 		if err != nil {
 			return err
 		}
 
-		sem <- struct{}{}
-		eg.Go(func() error {
-			defer func() { <-sem }()
-			_, err := s.push.PushChunkToClosest(ctx, c)
-			if err != nil {
-				if !errors.Is(err, topology.ErrWantSelf) {
-					return err
-				}
-				// swallow the error in case we are the closest node
-			}
-			return nil
-		})
-		return nil
+		stamp, err := stamper.Stamp(c.Address(), c.Address())
+		if err != nil {
+			return fmt.Errorf("stamping chunk %s: %w", c.Address(), err)
+		}
+
+		return uploaderSession.Put(ctx, c.WithStamp(stamp))
 	}
 
 	if err := s.traverser.Traverse(ctx, root, fn); err != nil {
-		return fmt.Errorf("traversal of %s failed: %w", root.String(), err)
+		return errors.Join(
+			fmt.Errorf("traversal of %s failed: %w", root.String(), err),
+			uploaderSession.Cleanup(),
+		)
 	}
 
-	if err := eg.Wait(); err != nil {
-		return fmt.Errorf("push error during reupload: %w", err)
-	}
-	return nil
+	return uploaderSession.Done(root)
 }
 
 // IsRetrievable implements Interface.IsRetrievable method.
 func (s *steward) IsRetrievable(ctx context.Context, root swarm.Address) (bool, error) {
-	noop := func(leaf swarm.Address) error { return nil }
-	switch err := s.netTraverser.Traverse(ctx, root, noop); {
+	fn := func(a swarm.Address) error {
+		_, err := s.netGetter.RetrieveChunk(ctx, a, swarm.ZeroAddress)
+		return err
+	}
+	switch err := s.netTraverser.Traverse(ctx, root, fn); {
 	case errors.Is(err, storage.ErrNotFound):
 		return false, nil
 	case errors.Is(err, topology.ErrNotFound):
@@ -110,11 +104,6 @@ type netGetter struct {
 }
 
 // Get implements the storage Getter.Get interface.
-func (ng *netGetter) Get(ctx context.Context, _ storage.ModeGet, addr swarm.Address) (swarm.Chunk, error) {
+func (ng *netGetter) Get(ctx context.Context, addr swarm.Address) (swarm.Chunk, error) {
 	return ng.retrieval.RetrieveChunk(ctx, addr, swarm.ZeroAddress)
-}
-
-// Put implements the storage Putter.Put interface.
-func (ng *netGetter) Put(_ context.Context, _ storage.ModePut, _ ...swarm.Chunk) ([]bool, error) {
-	return nil, errors.New("operation is not supported")
 }

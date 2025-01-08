@@ -5,8 +5,8 @@
 package api
 
 import (
-	"github.com/ethersphere/bee/pkg/log"
-	"github.com/ethersphere/bee/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
 )
 
 type (
@@ -15,12 +15,9 @@ type (
 	SocPostResponse       = socPostResponse
 	FeedReferenceResponse = feedReferenceResponse
 	BzzUploadResponse     = bzzUploadResponse
-	DebugTagResponse      = debugTagResponse
 	TagRequest            = tagRequest
 	ListTagsResponse      = listTagsResponse
 	IsRetrievableResponse = isRetrievableResponse
-	SecurityTokenResponse = securityTokenRsp
-	SecurityTokenRequest  = securityTokenReq
 )
 
 var (
@@ -31,8 +28,7 @@ var (
 )
 
 var (
-	ContentTypeTar    = contentTypeTar
-	ContentTypeHeader = contentTypeHeader
+	ContentTypeTar = contentTypeTar
 )
 
 var (
@@ -40,6 +36,8 @@ var (
 	ErrInvalidNameOrAddress             = errInvalidNameOrAddress
 	ErrUnsupportedDevNodeOperation      = errUnsupportedDevNodeOperation
 	ErrOperationSupportedOnlyInFullMode = errOperationSupportedOnlyInFullMode
+	ErrActDownload                      = errActDownload
+	ErrActUpload                        = errActUpload
 )
 
 var (
@@ -59,16 +57,13 @@ func (s *Service) ResolveNameOrAddress(str string) (swarm.Address, error) {
 	return s.resolveNameOrAddress(str)
 }
 
-func CalculateNumberOfChunks(contentLength int64, isEncrypted bool) int64 {
-	return calculateNumberOfChunks(contentLength, isEncrypted)
-}
-
 type (
 	HealthStatusResponse              = healthStatusResponse
 	NodeResponse                      = nodeResponse
 	PingpongResponse                  = pingpongResponse
 	PeerConnectResponse               = peerConnectResponse
 	PeersResponse                     = peersResponse
+	BlockedListedPeersResponse        = blockListedPeersResponse
 	AddressesResponse                 = addressesResponse
 	WelcomeMessageRequest             = welcomeMessageRequest
 	WelcomeMessageResponse            = welcomeMessageResponse
@@ -100,9 +95,12 @@ type (
 	PostageStampBucketsResponse       = postageStampBucketsResponse
 	BucketData                        = bucketData
 	WalletResponse                    = walletResponse
+	WalletTxResponse                  = walletTxResponse
 	GetStakeResponse                  = getStakeResponse
-	WithdrawAllStakeResponse          = withdrawAllStakeResponse
-	StatusLocalSnapshotResponse       = statusLocalSnapshotResponse
+	GetWithdrawableResponse           = getWithdrawableResponse
+	StakeTransactionReponse           = stakeTransactionReponse
+	StatusSnapshotResponse            = statusSnapshotResponse
+	StatusResponse                    = statusResponse
 )
 
 var (

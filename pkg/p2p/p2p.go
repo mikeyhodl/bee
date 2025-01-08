@@ -9,11 +9,12 @@ package p2p
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"time"
 
-	"github.com/ethersphere/bee/pkg/bzz"
-	"github.com/ethersphere/bee/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/bzz"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
 	"github.com/libp2p/go-libp2p/core/network"
 	ma "github.com/multiformats/go-multiaddr"
 )
@@ -64,7 +65,7 @@ type Service interface {
 	Disconnecter
 	Peers() []Peer
 	Blocklisted(swarm.Address) (bool, error)
-	BlocklistedPeers() ([]Peer, error)
+	BlocklistedPeers() ([]BlockListedPeer, error)
 	Addresses() ([]ma.Multiaddr, error)
 	SetPickyNotifier(PickyNotifier)
 	Halter
@@ -192,6 +193,13 @@ type Peer struct {
 	EthereumAddress []byte
 }
 
+// BlockListedPeer holds information about a Peer that is blocked.
+type BlockListedPeer struct {
+	Peer
+	Reason   string
+	Duration time.Duration
+}
+
 // HandlerFunc handles a received Stream from a Peer.
 type HandlerFunc func(context.Context, Peer, Stream) error
 
@@ -214,4 +222,18 @@ const (
 // protocol name and version and stream name.
 func NewSwarmStreamName(protocol, version, stream string) string {
 	return "/swarm/" + protocol + "/" + version + "/" + stream
+}
+
+type ChunkDeliveryError struct {
+	msg string
+}
+
+// Error implements the error interface.
+func (e *ChunkDeliveryError) Error() string {
+	return fmt.Sprintf("delivery of chunk failed: %s", e.msg)
+}
+
+// NewChunkDeliveryError is a convenience constructor for ChunkDeliveryError.
+func NewChunkDeliveryError(msg string) error {
+	return &ChunkDeliveryError{msg: msg}
 }

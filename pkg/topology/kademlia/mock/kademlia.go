@@ -7,10 +7,11 @@ package mock
 import (
 	"context"
 	"sync"
+	"time"
 
-	"github.com/ethersphere/bee/pkg/p2p"
-	"github.com/ethersphere/bee/pkg/swarm"
-	"github.com/ethersphere/bee/pkg/topology"
+	"github.com/ethersphere/bee/v2/pkg/p2p"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/topology"
 )
 
 type AddrTuple struct {
@@ -20,10 +21,7 @@ type AddrTuple struct {
 
 func WithEachPeerRevCalls(addrs ...AddrTuple) Option {
 	return optionFunc(func(m *Mock) {
-		for _, a := range addrs {
-			a := a
-			m.eachPeerRev = append(m.eachPeerRev, a)
-		}
+		m.eachPeerRev = append(m.eachPeerRev, addrs...)
 	})
 }
 
@@ -65,7 +63,7 @@ func (m *Mock) AddPeers(addr ...swarm.Address) {
 	panic("not implemented") // TODO: Implement
 }
 
-func (m *Mock) ClosestPeer(addr swarm.Address, _ bool, _ topology.Filter, skipPeers ...swarm.Address) (peerAddr swarm.Address, err error) {
+func (m *Mock) ClosestPeer(addr swarm.Address, _ bool, _ topology.Select, skipPeers ...swarm.Address) (peerAddr swarm.Address, err error) {
 	panic("not implemented") // TODO: Implement
 }
 
@@ -77,8 +75,23 @@ func (m *Mock) EachNeighborRev(topology.EachPeerFunc) error {
 	panic("not implemented") // TODO: Implement
 }
 
+func (m *Mock) UpdatePeerHealth(swarm.Address, bool, time.Duration) {
+	panic("not implemented") // TODO: Implement
+}
+
 // PeerIterator iterates from closest bin to farthest
-func (m *Mock) EachConnectedPeer(f topology.EachPeerFunc, _ topology.Filter) error {
+func (m *Mock) SetStorageRadius(uint8) {
+	panic("not implemented")
+}
+
+func (m *Mock) AddRevPeers(addrs ...AddrTuple) {
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
+	m.eachPeerRev = append(m.eachPeerRev, addrs...)
+}
+
+// EachConnectedPeer iterates from closest bin to farthest
+func (m *Mock) EachConnectedPeer(f topology.EachPeerFunc, _ topology.Select) error {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 
@@ -95,7 +108,7 @@ func (m *Mock) EachConnectedPeer(f topology.EachPeerFunc, _ topology.Filter) err
 }
 
 // EachPeerRev iterates from farthest bin to closest
-func (m *Mock) EachConnectedPeerRev(f topology.EachPeerFunc, _ topology.Filter) error {
+func (m *Mock) EachConnectedPeerRev(f topology.EachPeerFunc, _ topology.Select) error {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 	for _, v := range m.eachPeerRev {
@@ -108,6 +121,10 @@ func (m *Mock) EachConnectedPeerRev(f topology.EachPeerFunc, _ topology.Filter) 
 		}
 	}
 	return nil
+}
+
+func (m *Mock) IsReachable() bool {
+	return true
 }
 
 func (m *Mock) NeighborhoodDepth() uint8 {

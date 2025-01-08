@@ -16,22 +16,22 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	ma "github.com/multiformats/go-multiaddr"
 
-	ab "github.com/ethersphere/bee/pkg/addressbook"
-	"github.com/ethersphere/bee/pkg/bzz"
-	"github.com/ethersphere/bee/pkg/crypto"
-	"github.com/ethersphere/bee/pkg/hive"
-	"github.com/ethersphere/bee/pkg/hive/pb"
-	"github.com/ethersphere/bee/pkg/log"
-	"github.com/ethersphere/bee/pkg/p2p/protobuf"
-	"github.com/ethersphere/bee/pkg/p2p/streamtest"
-	"github.com/ethersphere/bee/pkg/spinlock"
-	"github.com/ethersphere/bee/pkg/statestore/mock"
-	"github.com/ethersphere/bee/pkg/swarm"
-	"github.com/ethersphere/bee/pkg/util/testutil"
+	ab "github.com/ethersphere/bee/v2/pkg/addressbook"
+	"github.com/ethersphere/bee/v2/pkg/bzz"
+	"github.com/ethersphere/bee/v2/pkg/crypto"
+	"github.com/ethersphere/bee/v2/pkg/hive"
+	"github.com/ethersphere/bee/v2/pkg/hive/pb"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/p2p/protobuf"
+	"github.com/ethersphere/bee/v2/pkg/p2p/streamtest"
+	"github.com/ethersphere/bee/v2/pkg/spinlock"
+	"github.com/ethersphere/bee/v2/pkg/statestore/mock"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/util/testutil"
 )
 
 var (
-	tx    = common.HexToHash("0x2").Bytes()
+	nonce = common.HexToHash("0x2").Bytes()
 	block = common.HexToHash("0x1").Bytes()
 )
 
@@ -50,7 +50,7 @@ func TestHandlerRateLimit(t *testing.T) {
 	// new recorder for handling Ping
 	streamer := streamtest.New()
 	// create a hive server that handles the incoming stream
-	server, _ := hive.New(streamer, addressbookclean, networkID, false, true, logger)
+	server := hive.New(streamer, addressbookclean, networkID, false, true, logger)
 	testutil.CleanupCloser(t, server)
 
 	serverAddress := swarm.RandAddress(t)
@@ -77,7 +77,7 @@ func TestHandlerRateLimit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		bzzAddr, err := bzz.NewAddress(signer, underlay, overlay, networkID, tx)
+		bzzAddr, err := bzz.NewAddress(signer, underlay, overlay, networkID, nonce)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -90,14 +90,14 @@ func TestHandlerRateLimit(t *testing.T) {
 	}
 
 	// create a hive client that will do broadcast
-	client, _ := hive.New(serverRecorder, addressbook, networkID, false, true, logger)
+	client := hive.New(serverRecorder, addressbook, networkID, false, true, logger)
 	err := client.BroadcastPeers(context.Background(), serverAddress, peers...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	testutil.CleanupCloser(t, client)
 
-	rec, err := serverRecorder.Records(serverAddress, "hive", "1.0.0", "peers")
+	rec, err := serverRecorder.Records(serverAddress, "hive", "1.1.0", "peers")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestHandlerRateLimit(t *testing.T) {
 	}
 }
 
-func TestBroadcastPeers_FLAKY(t *testing.T) {
+func TestBroadcastPeers(t *testing.T) {
 	t.Parallel()
 
 	logger := log.Noop
@@ -145,7 +145,7 @@ func TestBroadcastPeers_FLAKY(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		bzzAddr, err := bzz.NewAddress(signer, underlay, overlay, networkID, tx)
+		bzzAddr, err := bzz.NewAddress(signer, underlay, overlay, networkID, nonce)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -158,10 +158,10 @@ func TestBroadcastPeers_FLAKY(t *testing.T) {
 		}
 
 		wantMsgs[i/hive.MaxBatchSize].Peers = append(wantMsgs[i/hive.MaxBatchSize].Peers, &pb.BzzAddress{
-			Overlay:     bzzAddresses[i].Overlay.Bytes(),
-			Underlay:    bzzAddresses[i].Underlay.Bytes(),
-			Signature:   bzzAddresses[i].Signature,
-			Transaction: tx,
+			Overlay:   bzzAddresses[i].Overlay.Bytes(),
+			Underlay:  bzzAddresses[i].Underlay.Bytes(),
+			Signature: bzzAddresses[i].Signature,
+			Nonce:     nonce,
 		})
 	}
 
@@ -241,7 +241,6 @@ func TestBroadcastPeers_FLAKY(t *testing.T) {
 	}
 
 	for name, tc := range testCases {
-		tc := tc
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
@@ -255,7 +254,7 @@ func TestBroadcastPeers_FLAKY(t *testing.T) {
 				streamer = streamtest.New()
 			}
 			// create a hive server that handles the incoming stream
-			server, _ := hive.New(streamer, addressbookclean, networkID, false, true, logger)
+			server := hive.New(streamer, addressbookclean, networkID, false, true, logger)
 			testutil.CleanupCloser(t, server)
 
 			// setup the stream recorder to record stream data
@@ -264,14 +263,14 @@ func TestBroadcastPeers_FLAKY(t *testing.T) {
 			)
 
 			// create a hive client that will do broadcast
-			client, _ := hive.New(recorder, addressbook, networkID, false, tc.allowPrivateCIDRs, logger)
+			client := hive.New(recorder, addressbook, networkID, false, tc.allowPrivateCIDRs, logger)
 			if err := client.BroadcastPeers(context.Background(), tc.addresee, tc.peers...); err != nil {
 				t.Fatal(err)
 			}
 			testutil.CleanupCloser(t, client)
 
 			// get a record for this stream
-			records, err := recorder.Records(tc.addresee, "hive", "1.0.0", "peers")
+			records, err := recorder.Records(tc.addresee, "hive", "1.1.0", "peers")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -366,7 +365,6 @@ func readAndAssertPeersMsgs(in []byte, expectedLen int) ([]pb.Peers, error) {
 			return new(pb.Peers)
 		},
 	)
-
 	if err != nil {
 		return nil, err
 	}

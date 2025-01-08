@@ -18,21 +18,21 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
-	"github.com/ethersphere/bee/pkg/config"
-	"github.com/ethersphere/bee/pkg/crypto"
-	"github.com/ethersphere/bee/pkg/log"
-	"github.com/ethersphere/bee/pkg/p2p/libp2p"
-	"github.com/ethersphere/bee/pkg/postage/postagecontract"
-	"github.com/ethersphere/bee/pkg/sctx"
-	"github.com/ethersphere/bee/pkg/settlement"
-	"github.com/ethersphere/bee/pkg/settlement/swap"
-	"github.com/ethersphere/bee/pkg/settlement/swap/chequebook"
-	"github.com/ethersphere/bee/pkg/settlement/swap/erc20"
-	"github.com/ethersphere/bee/pkg/settlement/swap/priceoracle"
-	"github.com/ethersphere/bee/pkg/settlement/swap/swapprotocol"
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/ethersphere/bee/pkg/transaction"
-	"github.com/ethersphere/bee/pkg/transaction/wrapped"
+	"github.com/ethersphere/bee/v2/pkg/config"
+	"github.com/ethersphere/bee/v2/pkg/crypto"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/p2p/libp2p"
+	"github.com/ethersphere/bee/v2/pkg/postage/postagecontract"
+	"github.com/ethersphere/bee/v2/pkg/sctx"
+	"github.com/ethersphere/bee/v2/pkg/settlement"
+	"github.com/ethersphere/bee/v2/pkg/settlement/swap"
+	"github.com/ethersphere/bee/v2/pkg/settlement/swap/chequebook"
+	"github.com/ethersphere/bee/v2/pkg/settlement/swap/erc20"
+	"github.com/ethersphere/bee/v2/pkg/settlement/swap/priceoracle"
+	"github.com/ethersphere/bee/v2/pkg/settlement/swap/swapprotocol"
+	"github.com/ethersphere/bee/v2/pkg/storage"
+	"github.com/ethersphere/bee/v2/pkg/transaction"
+	"github.com/ethersphere/bee/v2/pkg/transaction/wrapped"
 	"github.com/ethersphere/go-sw3-abi/sw3abi"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -63,17 +63,17 @@ func InitChain(
 		// connect to the real one
 		rpcClient, err := rpc.DialContext(ctx, endpoint)
 		if err != nil {
-			return nil, common.Address{}, 0, nil, nil, fmt.Errorf("dial eth client: %w", err)
+			return nil, common.Address{}, 0, nil, nil, fmt.Errorf("dial blockchain client: %w", err)
 		}
 
 		var versionString string
 		err = rpcClient.CallContext(ctx, &versionString, "web3_clientVersion")
 		if err != nil {
-			logger.Info("could not connect to backend; in a swap-enabled network a working blockchain node (for xdai network in production, goerli in testnet) is required; check your node or specify another node using --swap-endpoint.", "backend_endpoint", endpoint)
-			return nil, common.Address{}, 0, nil, nil, fmt.Errorf("eth client get version: %w", err)
+			logger.Info("could not connect to backend; in a swap-enabled network a working blockchain node (for xdai network in production, sepolia in testnet) is required; check your node or specify another node using --swap-endpoint.", "backend_endpoint", endpoint)
+			return nil, common.Address{}, 0, nil, nil, fmt.Errorf("blockchain client get version: %w", err)
 		}
 
-		logger.Info("connected to ethereum backend", "version", versionString)
+		logger.Info("connected to blockchain backend", "version", versionString)
 
 		backend = wrapped.NewBackend(ethclient.NewClient(rpcClient))
 	}
@@ -85,12 +85,12 @@ func InitChain(
 
 	overlayEthAddress, err := signer.EthereumAddress()
 	if err != nil {
-		return nil, common.Address{}, 0, nil, nil, fmt.Errorf("eth address: %w", err)
+		return nil, common.Address{}, 0, nil, nil, fmt.Errorf("blockchain address: %w", err)
 	}
 
 	transactionMonitor := transaction.NewMonitor(logger, backend, overlayEthAddress, pollingInterval, cancellationDepth)
 
-	transactionService, err := transaction.NewService(logger, backend, signer, stateStore, chainID, transactionMonitor)
+	transactionService, err := transaction.NewService(logger, overlayEthAddress, backend, signer, stateStore, chainID, transactionMonitor)
 	if err != nil {
 		return nil, common.Address{}, 0, nil, nil, fmt.Errorf("new transaction service: %w", err)
 	}
@@ -100,20 +100,11 @@ func InitChain(
 
 // InitChequebookFactory will initialize the chequebook factory with the given
 // chain backend.
-func InitChequebookFactory(
-	logger log.Logger,
-	backend transaction.Backend,
-	chainID int64,
-	transactionService transaction.Service,
-	factoryAddress string,
-	legacyFactoryAddresses []string,
-) (chequebook.Factory, error) {
+func InitChequebookFactory(logger log.Logger, backend transaction.Backend, chainID int64, transactionService transaction.Service, factoryAddress string) (chequebook.Factory, error) {
 	var currentFactory common.Address
-	var legacyFactories []common.Address
-
 	chainCfg, found := config.GetByChainID(chainID)
 
-	foundFactory, foundLegacyFactories := chainCfg.CurrentFactoryAddress, chainCfg.LegacyFactoryAddresses
+	foundFactory := chainCfg.CurrentFactoryAddress
 	if factoryAddress == "" {
 		if !found {
 			return nil, fmt.Errorf("no known factory address for this network (chain id: %d)", chainID)
@@ -127,25 +118,7 @@ func InitChequebookFactory(
 		logger.Info("using custom factory address", "factory_address", currentFactory)
 	}
 
-	if len(legacyFactoryAddresses) == 0 {
-		if found {
-			legacyFactories = foundLegacyFactories
-		}
-	} else {
-		for _, legacyAddress := range legacyFactoryAddresses {
-			if !common.IsHexAddress(legacyAddress) {
-				return nil, errors.New("malformed factory address")
-			}
-			legacyFactories = append(legacyFactories, common.HexToAddress(legacyAddress))
-		}
-	}
-
-	return chequebook.NewFactory(
-		backend,
-		transactionService,
-		currentFactory,
-		legacyFactories,
-	), nil
+	return chequebook.NewFactory(backend, transactionService, currentFactory), nil
 }
 
 // InitChequebookService will initialize the chequebook service with the given
@@ -383,7 +356,7 @@ func (m noOpChainBackend) Metrics() []prometheus.Collector {
 }
 
 func (m noOpChainBackend) CodeAt(context.Context, common.Address, *big.Int) ([]byte, error) {
-	return common.FromHex(sw3abi.SimpleSwapFactoryDeployedBinv0_4_0), nil
+	return common.FromHex(sw3abi.SimpleSwapFactoryDeployedBinv0_6_5), nil
 }
 func (m noOpChainBackend) CallContract(context.Context, ethereum.CallMsg, *big.Int) ([]byte, error) {
 	return nil, errors.New("disabled chain backend")

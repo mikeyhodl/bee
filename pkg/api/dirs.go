@@ -18,23 +18,39 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ethersphere/bee/pkg/file"
-	"github.com/ethersphere/bee/pkg/file/loadsave"
-	"github.com/ethersphere/bee/pkg/jsonhttp"
-	"github.com/ethersphere/bee/pkg/log"
-	"github.com/ethersphere/bee/pkg/manifest"
-	"github.com/ethersphere/bee/pkg/postage"
-	"github.com/ethersphere/bee/pkg/sctx"
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/ethersphere/bee/pkg/swarm"
-	"github.com/ethersphere/bee/pkg/tags"
-	"github.com/ethersphere/bee/pkg/tracing"
+	"github.com/ethersphere/bee/v2/pkg/accesscontrol"
+	"github.com/ethersphere/bee/v2/pkg/file/loadsave"
+	"github.com/ethersphere/bee/v2/pkg/file/redundancy"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/manifest"
+	"github.com/ethersphere/bee/v2/pkg/postage"
+	storage "github.com/ethersphere/bee/v2/pkg/storage"
+	storer "github.com/ethersphere/bee/v2/pkg/storer"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/tracing"
+	"github.com/opentracing/opentracing-go"
+	"github.com/opentracing/opentracing-go/ext"
+	olog "github.com/opentracing/opentracing-go/log"
 )
 
 var errEmptyDir = errors.New("no files in root directory")
 
 // dirUploadHandler uploads a directory supplied as a tar in an HTTP request
-func (s *Service) dirUploadHandler(logger log.Logger, w http.ResponseWriter, r *http.Request, storer storage.Storer, waitFn func() error) {
+func (s *Service) dirUploadHandler(
+	ctx context.Context,
+	logger log.Logger,
+	span opentracing.Span,
+	w http.ResponseWriter,
+	r *http.Request,
+	putter storer.PutterSession,
+	contentTypeString string,
+	encrypt bool,
+	tag uint64,
+	rLevel redundancy.Level,
+	act bool,
+	historyAddress swarm.Address,
+) {
 	if r.Body == http.NoBody {
 		logger.Error(nil, "request has no body")
 		jsonhttp.BadRequest(w, errInvalidRequest)
@@ -42,7 +58,7 @@ func (s *Service) dirUploadHandler(logger log.Logger, w http.ResponseWriter, r *
 	}
 
 	// The error is ignored because the header was already validated by the caller.
-	mediaType, params, _ := mime.ParseMediaType(r.Header.Get(contentTypeHeader))
+	mediaType, params, _ := mime.ParseMediaType(contentTypeString)
 
 	var dReader dirReader
 	switch mediaType {
@@ -57,32 +73,16 @@ func (s *Service) dirUploadHandler(logger log.Logger, w http.ResponseWriter, r *
 	}
 	defer r.Body.Close()
 
-	tag, created, err := s.getOrCreateTag(r.Header.Get(SwarmTagHeader))
-	if err != nil {
-		logger.Debug("get or create tag failed", "error", err)
-		logger.Error(nil, "get or create tag failed")
-		switch {
-		case errors.Is(err, tags.ErrNotFound):
-			jsonhttp.NotFound(w, "tag not found")
-		default:
-			jsonhttp.InternalServerError(w, "cannot get or create tag")
-		}
-	}
-
-	// Add the tag to the context
-	ctx := sctx.SetTag(r.Context(), tag)
-
 	reference, err := storeDir(
 		ctx,
-		requestEncrypt(r),
+		encrypt,
 		dReader,
-		s.logger,
-		requestPipelineFn(storer, r),
-		loadsave.New(storer, requestPipelineFactory(ctx, storer, r)),
+		logger,
+		putter,
+		s.storer.ChunkStore(),
 		r.Header.Get(SwarmIndexDocumentHeader),
 		r.Header.Get(SwarmErrorDocumentHeader),
-		tag,
-		created,
+		rLevel,
 	)
 	if err != nil {
 		logger.Debug("store dir failed", "error", err)
@@ -97,38 +97,46 @@ func (s *Service) dirUploadHandler(logger log.Logger, w http.ResponseWriter, r *
 		default:
 			jsonhttp.InternalServerError(w, errDirectoryStore)
 		}
+		ext.LogError(span, err, olog.String("action", "dir.store"))
 		return
 	}
-	if created {
-		_, err = tag.DoneSplit(reference)
+
+	encryptedReference := reference
+	if act {
+		encryptedReference, err = s.actEncryptionHandler(r.Context(), w, putter, reference, historyAddress)
 		if err != nil {
-			logger.Debug("done split failed", "error", err)
-			logger.Error(nil, "done split failed")
-			jsonhttp.InternalServerError(w, "done split failed")
+			logger.Debug("access control upload failed", "error", err)
+			logger.Error(nil, "access control upload failed")
+			switch {
+			case errors.Is(err, accesscontrol.ErrNotFound):
+				jsonhttp.NotFound(w, "act or history entry not found")
+			case errors.Is(err, accesscontrol.ErrInvalidPublicKey) || errors.Is(err, accesscontrol.ErrSecretKeyInfinity):
+				jsonhttp.BadRequest(w, "invalid public key")
+			case errors.Is(err, accesscontrol.ErrUnexpectedType):
+				jsonhttp.BadRequest(w, "failed to create history")
+			default:
+				jsonhttp.InternalServerError(w, errActUpload)
+			}
 			return
 		}
 	}
 
-	if requestPin(r) {
-		if err := s.pinning.CreatePin(r.Context(), reference, false); err != nil {
-			logger.Debug("pin creation failed", "address", reference, "error", err)
-			logger.Error(nil, "pin creation failed")
-			jsonhttp.InternalServerError(w, "create pin failed")
-			return
-		}
-	}
-
-	if err = waitFn(); err != nil {
-		logger.Debug("sync chunks failed", "error", err)
-		logger.Error(nil, "sync chunks failed")
-		jsonhttp.InternalServerError(w, "sync chunks failed")
+	err = putter.Done(reference)
+	if err != nil {
+		logger.Debug("store dir failed", "error", err)
+		logger.Error(nil, "store dir failed")
+		jsonhttp.InternalServerError(w, errDirectoryStore)
+		ext.LogError(span, err, olog.String("action", "putter.Done"))
 		return
 	}
 
+	if tag != 0 {
+		w.Header().Set(SwarmTagHeader, fmt.Sprint(tag))
+		span.LogFields(olog.Bool("success", true))
+	}
 	w.Header().Set("Access-Control-Expose-Headers", SwarmTagHeader)
-	w.Header().Set(SwarmTagHeader, fmt.Sprint(tag.Uid))
 	jsonhttp.Created(w, bzzUploadResponse{
-		Reference: reference,
+		Reference: encryptedReference,
 	})
 }
 
@@ -139,15 +147,18 @@ func storeDir(
 	encrypt bool,
 	reader dirReader,
 	log log.Logger,
-	p pipelineFunc,
-	ls file.LoadSaver,
+	putter storage.Putter,
+	getter storage.Getter,
 	indexFilename,
 	errorFilename string,
-	tag *tags.Tag,
-	tagCreated bool,
+	rLevel redundancy.Level,
 ) (swarm.Address, error) {
+
 	logger := tracing.NewLoggerWithTraceID(ctx, log)
 	loggerV1 := logger.V(1).Build()
+
+	p := requestPipelineFn(putter, encrypt, rLevel)
+	ls := loadsave.New(getter, putter, requestPipelineFactory(ctx, putter, encrypt, rLevel))
 
 	dirManifest, err := manifest.NewDefaultManifest(ls, encrypt)
 	if err != nil {
@@ -166,18 +177,7 @@ func storeDir(
 		if errors.Is(err, io.EOF) {
 			break
 		} else if err != nil {
-			return swarm.ZeroAddress, fmt.Errorf("read tar stream: %w", err)
-		}
-
-		if !tagCreated {
-			// only in the case when tag is sent via header (i.e. not created by this request)
-			// for each file
-			if estimatedTotalChunks := calculateNumberOfChunks(fileInfo.Size, encrypt); estimatedTotalChunks > 0 {
-				err = tag.IncN(tags.TotalChunks, estimatedTotalChunks)
-				if err != nil {
-					return swarm.ZeroAddress, fmt.Errorf("increment tag: %w", err)
-				}
-			}
+			return swarm.ZeroAddress, fmt.Errorf("read dir stream: %w", err)
 		}
 
 		fileReference, err := p(ctx, fileInfo.Reader)
@@ -220,23 +220,8 @@ func storeDir(
 		}
 	}
 
-	storeSizeFn := []manifest.StoreSizeFunc{}
-	if !tagCreated {
-		// only in the case when tag is sent via header (i.e. not created by this request)
-		// each content that is saved for manifest
-		storeSizeFn = append(storeSizeFn, func(dataSize int64) error {
-			if estimatedTotalChunks := calculateNumberOfChunks(dataSize, encrypt); estimatedTotalChunks > 0 {
-				err = tag.IncN(tags.TotalChunks, estimatedTotalChunks)
-				if err != nil {
-					return fmt.Errorf("increment tag: %w", err)
-				}
-			}
-			return nil
-		})
-	}
-
 	// save manifest
-	manifestReference, err := dirManifest.Store(ctx, storeSizeFn...)
+	manifestReference, err := dirManifest.Store(ctx)
 	if err != nil {
 		return swarm.ZeroAddress, fmt.Errorf("store manifest: %w", err)
 	}
@@ -314,25 +299,14 @@ func (m *multipartReader) Next() (*FileInfo, error) {
 	if filePath == "" {
 		filePath = part.FormName()
 	}
-	if filePath == "" {
-		return nil, errors.New("filepath missing")
-	}
 
 	fileName := filepath.Base(filePath)
 
-	contentType := part.Header.Get(contentTypeHeader)
-	if contentType == "" {
-		return nil, errors.New("content-type missing")
-	}
+	contentType := part.Header.Get(ContentTypeHeader)
 
-	contentLength := part.Header.Get("Content-Length")
-	if contentLength == "" {
-		return nil, errors.New("content-length missing")
-	}
-	fileSize, err := strconv.ParseInt(contentLength, 10, 64)
-	if err != nil {
-		return nil, errors.New("invalid file size")
-	}
+	contentLength := part.Header.Get(ContentLengthHeader)
+
+	fileSize, _ := strconv.ParseInt(contentLength, 10, 64)
 
 	return &FileInfo{
 		Path:        filePath,

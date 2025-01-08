@@ -18,10 +18,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ethersphere/bee/pkg/crypto"
-	"github.com/ethersphere/bee/pkg/feeds"
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/ethersphere/bee/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/crypto"
+	"github.com/ethersphere/bee/v2/pkg/feeds"
+	storage "github.com/ethersphere/bee/v2/pkg/storage"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
 )
 
 // DefaultLevels is the number of concurrent lookaheads
@@ -67,7 +67,7 @@ func NewFinder(getter storage.Getter, feed *feeds.Feed) feeds.Lookup {
 }
 
 // At looks for incremental feed updates from 0 upwards, if it does not find one, it assumes that the last found update is the most recent
-func (f *finder) At(ctx context.Context, at, after int64) (ch swarm.Chunk, current, next feeds.Index, err error) {
+func (f *finder) At(ctx context.Context, at int64, _ uint64) (ch swarm.Chunk, current, next feeds.Index, err error) {
 	for i := uint64(0); ; i++ {
 		u, err := f.getter.Get(ctx, &index{i})
 		if err != nil {
@@ -78,14 +78,6 @@ func (f *finder) At(ctx context.Context, at, after int64) (ch swarm.Chunk, curre
 				current = &index{i - 1}
 			}
 			return ch, current, &index{i}, nil
-		}
-		ts, err := feeds.UpdatedAt(u)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		// if index is later than the `at` target index, then return previous chunk  and index
-		if ts > uint64(at) {
-			return ch, &index{i - 1}, &index{i}, nil
 		}
 		ch = u
 	}
@@ -147,15 +139,15 @@ type result struct {
 
 // At looks up the version valid at time `at`
 // after is a unix time hint of the latest known update
-func (f *asyncFinder) At(ctx context.Context, at, after int64) (ch swarm.Chunk, cur, next feeds.Index, err error) {
+func (f *asyncFinder) At(ctx context.Context, at int64, after uint64) (ch swarm.Chunk, cur, next feeds.Index, err error) {
 	// first lookup update at the 0 index
 	// TODO: consider receive after as uint
-	ch, err = f.get(ctx, at, uint64(after))
+	ch, err = f.get(ctx, at, after)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	if ch == nil {
-		return nil, nil, &index{uint64(after)}, nil
+		return nil, nil, &index{after}, nil
 	}
 	// if chunk exists construct an initial interval with base=0
 	c := make(chan *result)
@@ -203,10 +195,10 @@ func (f *asyncFinder) At(ctx context.Context, at, after int64) (ch swarm.Chunk, 
 }
 
 // at launches concurrent lookups at exponential intervals after the starting from further
-func (f *asyncFinder) at(ctx context.Context, at int64, min int, i *interval, c chan<- *result, quit <-chan struct{}) {
+func (f *asyncFinder) at(ctx context.Context, at int64, minValue int, i *interval, c chan<- *result, quit <-chan struct{}) {
 	var wg sync.WaitGroup
 
-	for l := i.level; l > min; l-- {
+	for l := i.level; l > minValue; l-- {
 		select {
 		case <-quit: // if the parent process quit
 			return
@@ -267,15 +259,6 @@ func (f *asyncFinder) get(ctx context.Context, at int64, idx uint64) (swarm.Chun
 		// if 'not-found' error, then just silence and return nil chunk
 		return nil, nil
 	}
-	ts, err := feeds.UpdatedAt(u)
-	if err != nil {
-		return nil, err
-	}
-	// this means the update timestamp is later than the pivot time we are looking for
-	// handled as if the update was missing but with no uncertainty due to timeout
-	if at < int64(ts) {
-		return nil, nil
-	}
 	return u, nil
 }
 
@@ -297,7 +280,7 @@ func NewUpdater(putter storage.Putter, signer crypto.Signer, topic []byte) (feed
 
 // Update pushes an update to the feed through the chunk stores
 func (u *updater) Update(ctx context.Context, at int64, payload []byte) error {
-	err := u.Put(ctx, &index{u.next}, at, payload)
+	err := u.Put(ctx, &index{u.next}, payload)
 	if err != nil {
 		return err
 	}

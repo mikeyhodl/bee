@@ -17,30 +17,30 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ethersphere/bee"
-	"github.com/ethersphere/bee/pkg/addressbook"
-	"github.com/ethersphere/bee/pkg/bzz"
-	beecrypto "github.com/ethersphere/bee/pkg/crypto"
-	"github.com/ethersphere/bee/pkg/log"
-	"github.com/ethersphere/bee/pkg/p2p"
-	"github.com/ethersphere/bee/pkg/p2p/libp2p/internal/blocklist"
-	"github.com/ethersphere/bee/pkg/p2p/libp2p/internal/breaker"
-	handshake "github.com/ethersphere/bee/pkg/p2p/libp2p/internal/handshake"
-	"github.com/ethersphere/bee/pkg/p2p/libp2p/internal/reacher"
-	"github.com/ethersphere/bee/pkg/storage"
-	"github.com/ethersphere/bee/pkg/swarm"
-	"github.com/ethersphere/bee/pkg/topology"
-	"github.com/ethersphere/bee/pkg/topology/lightnode"
-	"github.com/ethersphere/bee/pkg/tracing"
-	libp2p "github.com/libp2p/go-libp2p"
+	"github.com/ethersphere/bee/v2"
+	"github.com/ethersphere/bee/v2/pkg/addressbook"
+	"github.com/ethersphere/bee/v2/pkg/bzz"
+	beecrypto "github.com/ethersphere/bee/v2/pkg/crypto"
+	"github.com/ethersphere/bee/v2/pkg/log"
+	"github.com/ethersphere/bee/v2/pkg/p2p"
+	"github.com/ethersphere/bee/v2/pkg/p2p/libp2p/internal/blocklist"
+	"github.com/ethersphere/bee/v2/pkg/p2p/libp2p/internal/breaker"
+	"github.com/ethersphere/bee/v2/pkg/p2p/libp2p/internal/handshake"
+	"github.com/ethersphere/bee/v2/pkg/p2p/libp2p/internal/reacher"
+	"github.com/ethersphere/bee/v2/pkg/storage"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/topology"
+	"github.com/ethersphere/bee/v2/pkg/topology/lightnode"
+	"github.com/ethersphere/bee/v2/pkg/tracing"
+	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/host"
-	network "github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/network"
 	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
-	protocol "github.com/libp2p/go-libp2p/core/protocol"
-	autonat "github.com/libp2p/go-libp2p/p2p/host/autonat"
+	"github.com/libp2p/go-libp2p/core/protocol"
+	"github.com/libp2p/go-libp2p/p2p/host/autonat"
 	basichost "github.com/libp2p/go-libp2p/p2p/host/basic"
 	"github.com/libp2p/go-libp2p/p2p/host/peerstore/pstoremem"
 	rcmgr "github.com/libp2p/go-libp2p/p2p/host/resource-manager"
@@ -54,8 +54,8 @@ import (
 	"go.uber.org/atomic"
 
 	ocprom "contrib.go.opencensus.io/exporter/prometheus"
-	m2 "github.com/ethersphere/bee/pkg/metrics"
-	rcmgrObs "github.com/libp2p/go-libp2p/p2p/host/resource-manager/obs"
+	m2 "github.com/ethersphere/bee/v2/pkg/metrics"
+	rcmgrObs "github.com/libp2p/go-libp2p/p2p/host/resource-manager"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -174,14 +174,6 @@ func New(ctx context.Context, signer beecrypto.Signer, networkID uint64, overlay
 		return nil, err
 	}
 
-	cfg := rcmgr.InfiniteLimits
-
-	cfg.ProtocolPeerDefault.Streams = IncomingStreamCountLimit + OutgoingStreamCountLimit
-	cfg.ProtocolPeerDefault.StreamsInbound = IncomingStreamCountLimit
-	cfg.ProtocolPeerDefault.StreamsOutbound = OutgoingStreamCountLimit
-
-	limiter := rcmgr.NewFixedLimiter(cfg)
-
 	if o.Registry != nil {
 		rcmgrObs.MustRegisterWith(o.Registry)
 	}
@@ -193,6 +185,21 @@ func New(ctx context.Context, signer beecrypto.Signer, networkID uint64, overlay
 	if err != nil {
 		return nil, err
 	}
+
+	// Tweak certain settings
+	cfg := rcmgr.PartialLimitConfig{
+		System: rcmgr.ResourceLimits{
+			Streams:         IncomingStreamCountLimit + OutgoingStreamCountLimit,
+			StreamsOutbound: OutgoingStreamCountLimit,
+			StreamsInbound:  IncomingStreamCountLimit,
+		},
+	}
+
+	// Create our limits by using our cfg and replacing the default values with values from `scaledDefaultLimits`
+	limits := cfg.Build(rcmgr.InfiniteLimits)
+
+	// The resource manager expects a limiter, se we create one from our limits.
+	limiter := rcmgr.NewFixedLimiter(limits)
 
 	str, err := rcmgrObs.NewStatsTraceReporter()
 	if err != nil {
@@ -484,7 +491,7 @@ func (s *Service) handleIncoming(stream network.Stream) {
 				// kick another node to fit this one in
 				p, err := s.lightNodes.RandomPeer(peer.Address)
 				if err != nil {
-					s.logger.Debug("stream handler: cant find a peer slot for light node", "error", err)
+					s.logger.Debug("stream handler: can't find a peer slot for light node", "error", err)
 					_ = s.Disconnect(peer.Address, "unable to find peer slot for light node")
 					return
 				} else {
@@ -535,6 +542,7 @@ func (s *Service) handleIncoming(stream network.Stream) {
 	}
 
 	peerUserAgent := appendSpace(s.peerUserAgent(s.ctx, peerID))
+	s.networkStatus.Store(int32(p2p.NetworkStatusAvailable))
 
 	loggerV1.Debug("stream handler: successfully connected to peer (inbound)", "addresses", i.BzzAddress.ShortString(), "light", i.LightString(), "user_agent", peerUserAgent)
 	s.logger.Debug("stream handler: successfully connected to peer (inbound)", "address", i.BzzAddress.Overlay, "light", i.LightString(), "user_agent", peerUserAgent)
@@ -548,7 +556,6 @@ func (s *Service) SetPickyNotifier(n p2p.PickyNotifier) {
 
 func (s *Service) AddProtocol(p p2p.ProtocolSpec) (err error) {
 	for _, ss := range p.StreamSpecs {
-		ss := ss
 		id := protocol.ID(p2p.NewSwarmStreamName(p.Name, p.Version, ss.Name))
 		matcher, err := s.protocolSemverMatcher(id)
 		if err != nil {
@@ -637,24 +644,24 @@ func (s *Service) AddProtocol(p p2p.ProtocolSpec) (err error) {
 	return nil
 }
 
-func (s *Service) Addresses() (addreses []ma.Multiaddr, err error) {
+func (s *Service) Addresses() (addresses []ma.Multiaddr, err error) {
 	for _, addr := range s.host.Addrs() {
 		a, err := buildUnderlayAddress(addr, s.host.ID())
 		if err != nil {
 			return nil, err
 		}
 
-		addreses = append(addreses, a)
+		addresses = append(addresses, a)
 	}
-	if s.natAddrResolver != nil && len(addreses) > 0 {
-		a, err := s.natAddrResolver.Resolve(addreses[0])
+	if s.natAddrResolver != nil && len(addresses) > 0 {
+		a, err := s.natAddrResolver.Resolve(addresses[0])
 		if err != nil {
 			return nil, err
 		}
-		addreses = append(addreses, a)
+		addresses = append(addresses, a)
 	}
 
-	return addreses, nil
+	return addresses, nil
 }
 
 func (s *Service) NATManager() basichost.NATManager {
@@ -668,8 +675,15 @@ func (s *Service) Blocklist(overlay swarm.Address, duration time.Duration, reaso
 		return errors.New("cannot blocklist peer when network not available")
 	}
 
+	id, ok := s.peers.peerID(overlay)
+	if !ok {
+		return p2p.ErrPeerNotFound
+	}
+
+	full, _ := s.peers.fullnode(id)
+
 	loggerV1.Debug("libp2p blocklisting peer", "peer_address", overlay.String(), "duration", duration, "reason", reason)
-	if err := s.blocklist.Add(overlay, duration); err != nil {
+	if err := s.blocklist.Add(overlay, duration, reason, full); err != nil {
 		s.metrics.BlocklistedPeerErrCount.Inc()
 		_ = s.Disconnect(overlay, "failed blocklisting peer")
 		return fmt.Errorf("blocklist peer %s: %w", overlay, err)
@@ -681,7 +695,7 @@ func (s *Service) Blocklist(overlay swarm.Address, duration time.Duration, reaso
 }
 
 func buildHostAddress(peerID libp2ppeer.ID) (ma.Multiaddr, error) {
-	return ma.NewMultiaddr(fmt.Sprintf("/p2p/%s", peerID.Pretty()))
+	return ma.NewMultiaddr(fmt.Sprintf("/p2p/%s", peerID.String()))
 }
 
 func buildUnderlayAddress(addr ma.Multiaddr, peerID libp2ppeer.ID) (ma.Multiaddr, error) {
@@ -902,7 +916,7 @@ func (s *Service) Blocklisted(overlay swarm.Address) (bool, error) {
 	return s.blocklist.Exists(overlay)
 }
 
-func (s *Service) BlocklistedPeers() ([]p2p.Peer, error) {
+func (s *Service) BlocklistedPeers() ([]p2p.BlockListedPeer, error) {
 	return s.blocklist.Peers()
 }
 
@@ -960,7 +974,7 @@ func (s *Service) newStreamForPeerID(ctx context.Context, peerID libp2ppeer.ID, 
 		if errors.Is(err, multistream.ErrIncorrectVersion) {
 			return nil, p2p.NewIncompatibleStreamError(err)
 		}
-		return nil, fmt.Errorf("create stream %q to %q: %w", swarmStreamName, peerID, err)
+		return nil, fmt.Errorf("create stream %s to %s: %w", swarmStreamName, peerID, err)
 	}
 	s.metrics.CreatedStreamCount.Inc()
 	return st, nil

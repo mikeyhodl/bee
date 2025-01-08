@@ -5,23 +5,28 @@
 package api
 
 import (
-	"encoding/binary"
+	"bytes"
 	"encoding/hex"
 	"errors"
-	"fmt"
+	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethersphere/bee/pkg/feeds"
-	"github.com/ethersphere/bee/pkg/file/loadsave"
-	"github.com/ethersphere/bee/pkg/jsonhttp"
-	"github.com/ethersphere/bee/pkg/manifest"
-	"github.com/ethersphere/bee/pkg/manifest/mantaray"
-	"github.com/ethersphere/bee/pkg/manifest/simple"
-	"github.com/ethersphere/bee/pkg/postage"
-	"github.com/ethersphere/bee/pkg/soc"
-	"github.com/ethersphere/bee/pkg/swarm"
+	"github.com/ethersphere/bee/v2/pkg/accesscontrol"
+	"github.com/ethersphere/bee/v2/pkg/feeds"
+	"github.com/ethersphere/bee/v2/pkg/file/loadsave"
+	"github.com/ethersphere/bee/v2/pkg/jsonhttp"
+	"github.com/ethersphere/bee/v2/pkg/manifest"
+	"github.com/ethersphere/bee/v2/pkg/manifest/mantaray"
+	"github.com/ethersphere/bee/v2/pkg/manifest/simple"
+	"github.com/ethersphere/bee/v2/pkg/postage"
+	"github.com/ethersphere/bee/v2/pkg/soc"
+	"github.com/ethersphere/bee/v2/pkg/storage"
+	"github.com/ethersphere/bee/v2/pkg/storer"
+	"github.com/ethersphere/bee/v2/pkg/swarm"
 	"github.com/gorilla/mux"
 )
 
@@ -30,8 +35,6 @@ const (
 	feedMetadataEntryTopic = "swarm-feed-topic"
 	feedMetadataEntryType  = "swarm-feed-type"
 )
-
-var errInvalidFeedUpdate = errors.New("invalid feed update")
 
 type feedReferenceResponse struct {
 	Reference swarm.Address `json:"reference"`
@@ -50,7 +53,8 @@ func (s *Service) feedGetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	queries := struct {
-		At int64 `map:"at"`
+		At    int64  `map:"at"`
+		After uint64 `map:"after"`
 	}{}
 	if response := s.mapStructure(r.URL.Query(), &queries); response != nil {
 		response("invalid query params", logger, w)
@@ -58,6 +62,14 @@ func (s *Service) feedGetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if queries.At == 0 {
 		queries.At = time.Now().Unix()
+	}
+
+	headers := struct {
+		OnlyRootChunk bool `map:"Swarm-Only-Root-Chunk"`
+	}{}
+	if response := s.mapStructure(r.Header, &headers); response != nil {
+		response("invalid header params", logger, w)
+		return
 	}
 
 	f := feeds.New(paths.Topic, paths.Owner)
@@ -74,7 +86,7 @@ func (s *Service) feedGetHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ch, cur, next, err := lookup.At(r.Context(), queries.At, 0)
+	ch, cur, next, err := lookup.At(r.Context(), queries.At, queries.After)
 	if err != nil {
 		logger.Debug("lookup at failed", "at", queries.At, "error", err)
 		logger.Error(nil, "lookup at failed")
@@ -90,11 +102,10 @@ func (s *Service) feedGetHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ref, _, err := parseFeedUpdate(ch)
+	wc, err := feeds.GetWrappedChunk(r.Context(), s.storer.Download(false), ch)
 	if err != nil {
-		logger.Debug("mapStructure feed update failed", "error", err)
-		logger.Error(nil, "mapStructure feed update failed")
-		jsonhttp.InternalServerError(w, "mapStructure feed update failed")
+		logger.Error(nil, "wrapped chunk cannot be retrieved")
+		jsonhttp.NotFound(w, "wrapped chunk cannot be retrieved")
 		return
 	}
 
@@ -114,11 +125,33 @@ func (s *Service) feedGetHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set(SwarmFeedIndexHeader, hex.EncodeToString(curBytes))
-	w.Header().Set(SwarmFeedIndexNextHeader, hex.EncodeToString(nextBytes))
-	w.Header().Set("Access-Control-Expose-Headers", fmt.Sprintf("%s, %s", SwarmFeedIndexHeader, SwarmFeedIndexNextHeader))
+	socCh, err := soc.FromChunk(ch)
+	if err != nil {
+		logger.Error(nil, "wrapped chunk cannot be retrieved")
+		jsonhttp.NotFound(w, "wrapped chunk cannot be retrieved")
+		return
+	}
+	sig := socCh.Signature()
 
-	jsonhttp.OK(w, feedReferenceResponse{Reference: ref})
+	additionalHeaders := http.Header{
+		ContentTypeHeader:               {"application/octet-stream"},
+		SwarmFeedIndexHeader:            {hex.EncodeToString(curBytes)},
+		SwarmFeedIndexNextHeader:        {hex.EncodeToString(nextBytes)},
+		SwarmSocSignatureHeader:         {hex.EncodeToString(sig)},
+		"Access-Control-Expose-Headers": {SwarmFeedIndexHeader, SwarmFeedIndexNextHeader, SwarmSocSignatureHeader},
+	}
+
+	if headers.OnlyRootChunk {
+		w.Header().Set(ContentLengthHeader, strconv.Itoa(len(wc.Data())))
+		// include additional headers
+		for name, values := range additionalHeaders {
+			w.Header().Set(name, strings.Join(values, ", "))
+		}
+		_, _ = io.Copy(w, bytes.NewReader(wc.Data()))
+		return
+	}
+
+	s.downloadHandler(logger, w, r, wc.Address(), additionalHeaders, true, false, wc)
 }
 
 func (s *Service) feedPostHandler(w http.ResponseWriter, r *http.Request) {
@@ -133,10 +166,47 @@ func (s *Service) feedPostHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	putter, wait, err := s.newStamperPutter(r)
+	headers := struct {
+		BatchID        []byte        `map:"Swarm-Postage-Batch-Id" validate:"required"`
+		Pin            bool          `map:"Swarm-Pin"`
+		Deferred       *bool         `map:"Swarm-Deferred-Upload"`
+		Act            bool          `map:"Swarm-Act"`
+		HistoryAddress swarm.Address `map:"Swarm-Act-History-Address"`
+	}{}
+	if response := s.mapStructure(r.Header, &headers); response != nil {
+		response("invalid header params", logger, w)
+		return
+	}
+
+	var (
+		tag      storer.SessionInfo
+		err      error
+		deferred = defaultUploadMethod(headers.Deferred)
+	)
+	if deferred || headers.Pin {
+		tag, err = s.storer.NewSession()
+		if err != nil {
+			logger.Debug("get or create tag failed", "error", err)
+			logger.Error(nil, "get or create tag failed")
+			switch {
+			case errors.Is(err, storage.ErrNotFound):
+				jsonhttp.NotFound(w, "tag not found")
+			default:
+				jsonhttp.InternalServerError(w, "cannot get or create tag")
+			}
+			return
+		}
+	}
+
+	putter, err := s.newStamperPutter(r.Context(), putterOptions{
+		BatchID:  headers.BatchID,
+		TagID:    tag.TagID,
+		Pin:      headers.Pin,
+		Deferred: deferred,
+	})
 	if err != nil {
-		logger.Debug("putter failed", "error", err)
-		logger.Error(nil, "putter failed")
+		logger.Debug("get putter failed", "error", err)
+		logger.Error(nil, "get putter failed")
 		switch {
 		case errors.Is(err, errBatchUnusable) || errors.Is(err, postage.ErrNotUsable):
 			jsonhttp.UnprocessableEntity(w, "batch not usable yet or does not exist")
@@ -152,16 +222,22 @@ func (s *Service) feedPostHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	l := loadsave.New(putter, requestPipelineFactory(r.Context(), putter, r))
+	ow := &cleanupOnErrWriter{
+		ResponseWriter: w,
+		onErr:          putter.Cleanup,
+		logger:         logger,
+	}
+
+	l := loadsave.New(s.storer.ChunkStore(), s.storer.Cache(), requestPipelineFactory(r.Context(), putter, false, 0))
 	feedManifest, err := manifest.NewDefaultManifest(l, false)
 	if err != nil {
 		logger.Debug("create manifest failed", "error", err)
 		logger.Error(nil, "create manifest failed")
 		switch {
 		case errors.Is(err, manifest.ErrInvalidManifestType):
-			jsonhttp.BadRequest(w, "invalid manifest type")
+			jsonhttp.BadRequest(ow, "invalid manifest type")
 		default:
-			jsonhttp.InternalServerError(w, "create manifest failed")
+			jsonhttp.InternalServerError(ow, "create manifest failed")
 		}
 	}
 
@@ -180,11 +256,11 @@ func (s *Service) feedPostHandler(w http.ResponseWriter, r *http.Request) {
 		logger.Error(nil, "add manifest entry failed")
 		switch {
 		case errors.Is(err, simple.ErrEmptyPath):
-			jsonhttp.NotFound(w, "invalid or empty path")
+			jsonhttp.NotFound(ow, "invalid or empty path")
 		case errors.Is(err, mantaray.ErrEmptyPath):
-			jsonhttp.NotFound(w, "invalid path or mantaray path is empty")
+			jsonhttp.NotFound(ow, "invalid path or mantaray path is empty")
 		default:
-			jsonhttp.InternalServerError(w, "add manifest entry failed")
+			jsonhttp.InternalServerError(ow, "add manifest entry failed")
 		}
 		return
 	}
@@ -194,47 +270,40 @@ func (s *Service) feedPostHandler(w http.ResponseWriter, r *http.Request) {
 		logger.Error(nil, "store manifest failed")
 		switch {
 		case errors.Is(err, postage.ErrBucketFull):
-			jsonhttp.PaymentRequired(w, "batch is overissued")
+			jsonhttp.PaymentRequired(ow, "batch is overissued")
 		default:
-			jsonhttp.InternalServerError(w, "store manifest failed")
+			jsonhttp.InternalServerError(ow, "store manifest failed")
 		}
 		return
 	}
 
-	if requestPin(r) {
-		if err := s.pinning.CreatePin(r.Context(), ref, false); err != nil {
-			logger.Debug("pin creation failed: %v", "address", ref, "error", err)
-			logger.Error(nil, "pin creation failed")
-			jsonhttp.InternalServerError(w, "creation of pin failed")
+	encryptedReference := ref
+	if headers.Act {
+		encryptedReference, err = s.actEncryptionHandler(r.Context(), w, putter, ref, headers.HistoryAddress)
+		if err != nil {
+			logger.Debug("access control upload failed", "error", err)
+			logger.Error(nil, "access control upload failed")
+			switch {
+			case errors.Is(err, accesscontrol.ErrNotFound):
+				jsonhttp.NotFound(w, "act or history entry not found")
+			case errors.Is(err, accesscontrol.ErrInvalidPublicKey) || errors.Is(err, accesscontrol.ErrSecretKeyInfinity):
+				jsonhttp.BadRequest(w, "invalid public key")
+			case errors.Is(err, accesscontrol.ErrUnexpectedType):
+				jsonhttp.BadRequest(w, "failed to create history")
+			default:
+				jsonhttp.InternalServerError(w, errActUpload)
+			}
 			return
 		}
 	}
 
-	if err = wait(); err != nil {
-		logger.Debug("sync chunks failed", "error", err)
-		logger.Error(nil, "sync chunks failed")
-		jsonhttp.InternalServerError(w, "sync failed")
+	err = putter.Done(ref)
+	if err != nil {
+		logger.Debug("done split failed", "error", err)
+		logger.Error(nil, "done split failed")
+		jsonhttp.InternalServerError(ow, "done split failed")
 		return
 	}
 
-	jsonhttp.Created(w, feedReferenceResponse{Reference: ref})
-}
-
-func parseFeedUpdate(ch swarm.Chunk) (swarm.Address, int64, error) {
-	s, err := soc.FromChunk(ch)
-	if err != nil {
-		return swarm.ZeroAddress, 0, fmt.Errorf("soc unmarshal: %w", err)
-	}
-
-	update := s.WrappedChunk().Data()
-	// split the timestamp and reference
-	// possible values right now:
-	// unencrypted ref: span+timestamp+ref => 8+8+32=48
-	// encrypted ref: span+timestamp+ref+decryptKey => 8+8+64=80
-	if len(update) != 48 && len(update) != 80 {
-		return swarm.ZeroAddress, 0, errInvalidFeedUpdate
-	}
-	ts := binary.BigEndian.Uint64(update[8:16])
-	ref := swarm.NewAddress(update[16:])
-	return ref, int64(ts), nil
+	jsonhttp.Created(w, feedReferenceResponse{Reference: encryptedReference})
 }
